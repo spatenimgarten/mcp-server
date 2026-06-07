@@ -1,7 +1,7 @@
 # TIA Portal MCP Server
 
-Python-basierter MCP-Server (Model Context Protocol) der Claude und lokale LLMs
-(Ollama) mit **TIA Portal V21** über die Openness API verbindet.
+Python-basierter MCP-Server (Model Context Protocol) der Claude, lokale LLMs
+(Ollama) und **Microsoft Copilot Studio** mit **TIA Portal V21** über die Openness API verbindet.
 
 Ermöglicht LLM-gesteuerte Automatisierung von PLC/HMI-Entwicklungsaufgaben:
 Bausteine lesen und bearbeiten, Tags verwalten, HMI konfigurieren, Projekte validieren.
@@ -17,6 +17,8 @@ Bausteine lesen und bearbeiten, Tags verwalten, HMI konfigurieren, Projekte vali
 | `server.py` | MCP stdio Server · Tool-Definitionen · System Prompt · Singleton-Lock |
 | `tia.py` | TIA Openness Anbindung · STA-Thread · Session · PLC · HMI · Bibliothek · Executor |
 | `bridge.py` | Ollama ↔ MCP Bridge · lokales LLM statt Claude Desktop |
+| `web_server.py` | MCP HTTP Streamable Server · für Copilot Studio via Dev Tunnel |
+| `start_copilot.bat` | Starter: TIA Portal + web_server.py + Dev Tunnel |
 
 ---
 
@@ -44,6 +46,10 @@ pip install mcp pythonnet
 **TIA Openness aktivieren:**
 Extras → Einstellungen → Allgemein → TIA Portal Openness → Zugriff erlauben → TIA neu starten
 
+---
+
+## Modus 1 — Claude Desktop (stdio)
+
 **Claude Desktop konfigurieren** (`%APPDATA%\Claude\claude_desktop_config.json`):
 
 ```json
@@ -59,6 +65,73 @@ Extras → Einstellungen → Allgemein → TIA Portal Openness → Zugriff erlau
 ```
 
 > `command` muss auf die `python.exe` im `.venv` zeigen — nicht System-Python!
+
+TIA Portal öffnen, Projekt laden, Claude Desktop starten — das Hammer-Symbol unten im Chat zeigt alle verfügbaren Tools.
+
+---
+
+## Modus 2 — Copilot Studio (HTTP via Dev Tunnel)
+
+`web_server.py` implementiert den **MCP Streamable HTTP Transport** den Copilot Studio benötigt.
+Da Copilot Studio eine öffentlich erreichbare HTTPS-URL erwartet, wird ein
+**Microsoft Dev Tunnel** eingesetzt der den lokalen Port 8000 nach außen tunnelt.
+
+> Die TIA-Daten verlassen dabei das lokale System — nur sinnvoll wenn das
+> datenschutzseitig akzeptiert ist (Microsoft M365-Tenant).
+
+### Einmalige Einrichtung
+
+**Pakete nachinstallieren:**
+```powershell
+.venv\Scripts\activate
+pip install uvicorn starlette
+```
+
+**Dev Tunnel CLI installieren und einrichten:**
+```powershell
+winget install Microsoft.devtunnel
+devtunnel user login                          # mit Firmen-Microsoft-Account anmelden
+devtunnel create tia-mcp --allow-anonymous    # benannten Tunnel anlegen
+devtunnel port create tia-mcp -p 8000         # Port 8000 registrieren
+devtunnel show tia-mcp                        # feste URL anzeigen
+```
+
+Die URL hat das Format `https://tia-mcp-8000.euw.devtunnels.ms` — diese **einmalig**
+in Copilot Studio eintragen.
+
+**Copilot Studio konfigurieren:**
+```
+Agent öffnen
+→ Tools → Add Tool → New Tool → Model Context Protocol
+→ URL: https://tia-mcp-8000.euw.devtunnels.ms/mcp
+→ Authentication: None
+→ Create
+```
+
+### Täglicher Betrieb
+
+```powershell
+# Alles auf einmal starten:
+start_copilot.bat
+```
+
+Die Batch-Datei startet in dieser Reihenfolge:
+1. TIA Portal (minimiert, 35 Sekunden Wartezeit)
+2. `web_server.py` in eigenem Fenster (Port 8000)
+3. Dev Tunnel `tia-mcp` in eigenem Fenster
+
+Zum Beenden: beide Fenster schließen und TIA Portal beenden.
+Der Tunnel ist **nur aktiv solange der Prozess läuft** — kein Dauerzugriff von außen.
+
+### Projektpfad anpassen
+
+In `start_copilot.bat` ganz oben:
+```bat
+set PROJECT_DIR=F:\02_Projekte\AI\MCP-Server
+```
+
+> `server.py` (Claude Desktop / stdio) und `web_server.py` (Copilot Studio / HTTP)
+> verwenden denselben TIA STA-Thread — **nicht gleichzeitig starten**.
 
 ---
 
@@ -131,7 +204,7 @@ connect_portal()        → attach (laufende TIA-Instanz)
 attach_project()        → offenes Projekt übernehmen
 
 # 2. Orientieren
-list_devices()          → PLC_1, HMI_1 identifizieren
+list_devices()                   → PLC_1, HMI_1 identifizieren
 list_plc_blocks("PLC_1")         → Bausteinübersicht
 list_plc_tag_tables("PLC_1")     → verfügbare Tabellen
 
@@ -143,7 +216,7 @@ save_project()                               → speichern
 
 ---
 
-## Lokales LLM (Ollama + bridge.py)
+## Modus 3 — Lokales LLM (Ollama + bridge.py)
 
 ```powershell
 pip install ollama
@@ -186,6 +259,8 @@ Empfohlene Modelle (CPU-only VM):
 | `Block is inconsistent` | `compile_plc()` aufrufen, dann erneut exportieren |
 | `find_software` → None | DeviceItem-Namen mit `list_devices()` prüfen |
 | Kein Hammer-Symbol | `claude_desktop_config.json` prüfen, venv-Pfad korrekt? |
+| Copilot Studio: Verbindungsfehler | Dev Tunnel läuft? `web_server.py` läuft? Port 8000 frei? |
+| Tunnel-URL ändert sich | Benannten Tunnel verwenden: `devtunnel create tia-mcp` |
 
 Logs: `C:\tia-mcp\logs\tia_mcp.log`
 

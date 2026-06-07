@@ -1,498 +1,579 @@
 """
-tia_export.py — TIA Portal Projektübersicht nach Excel exportieren
-
-Liest aus dem geöffneten TIA Portal Projekt:
-  - Alle PLC-Bausteine (mit Typ, Nummer, Sprache, Ordnerpfad)
-  - Alle PLC-Tag-Tabellen (mit Tags, Typ, Adresse, Kommentar)
-  - Alle DB-Variablen (aus XML-Export, mit Typ und Kommentar)
-  - Alle HMI-Tags (falls HMI bereits vorhanden)
-
-Ausgabe: Excel-Datei mit vier Sheets — bereit für HMI-Planung.
-Spalten Hi/Lo/Einheit/HMI bleiben leer → manuell ausfüllen.
+tia_export.py — DB-Variablen mit Querverweis-Analyse
+======================================================
+Liest alle globalen DBs aus TIA Portal, exportiert alle Bausteine als XML,
+analysiert Zugriffe (Read / Write / ReadWrite) und schreibt eine Excel-Datei
+zur manuellen Prüfung vor dem HMI-Import.
 
 Voraussetzungen:
+  TIA Portal V21 offen, Projekt geladen
   pip install openpyxl
-  TIA Portal muss offen sein, Projekt muss geladen sein.
 
-Start:
-  .venv\\Scripts\\python.exe tia_export.py
-  .venv\\Scripts\\python.exe tia_export.py --output C:\\tia-mcp\\export\\meinprojekt.xlsx
-  .venv\\Scripts\\python.exe tia_export.py --plc PLC_2 --hmi HMI_1
+Aufruf:
+  .venv\\Scripts\\python.exe tools\\tia_export.py
+  .venv\\Scripts\\python.exe tools\\tia_export.py --device PLC_1 --out C:\\tia-mcp\\export\\projekt.xlsx
+
+Ergebnis:
+  projekt.xlsx mit Sheet "DB_Variablen":
+    DB | Gruppe | Variable | Datentyp | Zugriff | Ins HMI? | HMI-Tagname | Tabelle | Hi | Lo | Einheit | Archiv | Zykluszeit_ms
 """
 
-import sys
-import argparse
-import re
-import xml.etree.ElementTree as ET
+import sys, os, re, argparse
 from pathlib import Path
-from datetime import datetime
+from collections import defaultdict
 
-# openpyxl
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+# ── Pfad zum MCP-Server-Modul ──────────────────────────────────────────────────
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_ROOT = _SCRIPT_DIR.parent          # tools/ liegt unter dem Repo-Root
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-# tia.py im selben Verzeichnis
-sys.path.insert(0, str(Path(__file__).parent))
 import tia
+from tia import TiaError
 
-# ── Konstanten ─────────────────────────────────────────────────────────────────
+# ── Konfiguration ──────────────────────────────────────────────────────────────
 
-DEFAULT_OUTPUT  = r"C:\tia-mcp\export\tia_export.xlsx"
-TEMP_EXPORT_DIR = r"C:\tia-mcp\export\temp_xml"
+DEFAULT_DEVICE  = ""                           # leer = erstes PLC im Projekt
+DEFAULT_OUT     = r"C:\tia-mcp\export\projekt.xlsx"
+EXPORT_TMP      = r"C:\tia-mcp\export\xml_tmp"   # temporärer XML-Exportordner
 
-# Farben
-COLOR_HEADER      = "1F4E79"   # Dunkelblau
-COLOR_SHEET_TAB   = "2E75B6"   # Mittelblau
-COLOR_ALT_ROW     = "DEEAF1"   # Hellblau (alternierende Zeilen)
-COLOR_EMPTY_HINT  = "FFF2CC"   # Gelb — Spalten die manuell gefüllt werden sollen
-COLOR_WHITE       = "FFFFFF"
+# Datentypen die als "analog" / HMI-relevant gelten → werden als Read vormarkiert
+ANALOG_TYPES = {"Real", "LReal", "Int", "DInt", "UInt", "UDInt",
+                "SInt", "USInt", "Word", "DWord", "LWord", "Byte"}
 
-FONT_HEADER = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-FONT_NORMAL = Font(name="Arial", size=10)
-FONT_HINT   = Font(name="Arial", size=9, italic=True, color="7F7F7F")
+# ── Logging ────────────────────────────────────────────────────────────────────
 
-# ── Excel-Hilfsfunktionen ──────────────────────────────────────────────────────
+def log(msg):
+    print(f"  {msg}", flush=True)
 
-def _header_row(ws, cols: list[tuple[str, int]], color=COLOR_HEADER):
-    """Kopfzeile schreiben und formatieren. cols = [(Name, Breite), ...]"""
-    fill   = PatternFill("solid", start_color=color)
-    border = Border(
-        bottom=Side(style="thin", color="FFFFFF"),
-        right= Side(style="thin", color="FFFFFF"),
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCHRITT 1 — DB-Variablen lesen
+# ══════════════════════════════════════════════════════════════════════════════
+
+def read_db_variables(device_name: str) -> list[dict]:
+    """
+    Liest alle globalen DBs und deren Interface-Variablen via execute_openness.
+    Gibt eine flache Liste zurück:
+      {"db": str, "variable": str, "datatype": str}
+    """
+    code = """
+stack = [(plc.BlockGroup, "")]
+result = []
+while stack:
+    group, path = stack.pop()
+    for block in group.Blocks:
+        btype = type(block).__name__
+        # Nur DataBlocks — keine Instanz-DBs (InstanceDataBlock)
+        if btype != "DataBlock":
+            continue
+        db_name = block.Name
+        try:
+            members = block.Interface.Members
+            for m in members:
+                mname = safe_str(m.Name)
+                mtype = safe_str(getattr(m, "Datatype", ""))
+                # UDT-Member auffalten (eine Ebene)
+                try:
+                    sub_members = list(m.Members)
+                    if sub_members:
+                        for sm in sub_members:
+                            smname = safe_str(sm.Name)
+                            smtype = safe_str(getattr(sm, "Datatype", ""))
+                            result.append({
+                                "db": db_name,
+                                "gruppe": path,
+                                "variable": f"{mname}.{smname}",
+                                "datatype": smtype,
+                            })
+                        continue
+                except Exception:
+                    pass
+                result.append({
+                    "db": db_name,
+                    "gruppe": path,
+                    "variable": mname,
+                    "datatype": mtype,
+                })
+        except Exception as e:
+            result.append({"db": db_name, "gruppe": path,
+                           "variable": f"[FEHLER: {e}]", "datatype": ""})
+    for sub in group.Groups:
+        sub_path = f"{path}/{sub.Name}".lstrip("/")
+        stack.append((sub, sub_path))
+"""
+
+    # find_software mit device_name oder erstem PLC
+    setup = f"""
+plc = find_software("{device_name}", "PlcSoftware")
+if not plc:
+    plc = find_software("", "PlcSoftware")
+if not plc:
+    result = {{"error": "PLC nicht gefunden"}}
+else:
+"""
+    # Einrücken des Haupt-Codes
+    indented = "\n".join("    " + line for line in code.strip().splitlines())
+    full_code = setup + indented
+
+    res = tia.execute_openness(full_code, mode="read")
+    if isinstance(res.get("result"), dict) and "error" in res["result"]:
+        raise RuntimeError(res["result"]["error"])
+    return res.get("result") or []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCHRITT 2 — Alle Bausteine exportieren
+# ══════════════════════════════════════════════════════════════════════════════
+
+def export_all_blocks(device_name: str, export_dir: str) -> list[str]:
+    """
+    Exportiert alle OBs, FCs, FBs (nicht DBs) als XML in export_dir.
+    Gibt Liste der erzeugten XML-Dateien zurück.
+    """
+    Path(export_dir).mkdir(parents=True, exist_ok=True)
+
+    code = f"""
+from System.IO import FileInfo, DirectoryInfo
+import Siemens.Engineering as _eng
+
+plc = find_software("{device_name}", "PlcSoftware")
+if not plc:
+    plc = find_software("", "PlcSoftware")
+
+exported = []
+errors   = []
+
+stack = [plc.BlockGroup]
+while stack:
+    group = stack.pop()
+    for block in group.Blocks:
+        btype = type(block).__name__
+        # DBs überspringen — nur Programm-Bausteine
+        if "DataBlock" in btype:
+            continue
+        bname = safe_str(block.Name)
+        xml_path = r"{export_dir}\\" + bname + ".xml"
+        try:
+            block.Export(FileInfo(xml_path), _eng.ExportOptions.WithDefaults)
+            exported.append(xml_path)
+        except Exception as e:
+            errors.append({{"block": bname, "error": str(e)}})
+    for sub in group.Groups:
+        stack.append(sub)
+
+result = {{"exported": exported, "errors": errors}}
+"""
+
+    res = tia.execute_openness(code, mode="read")
+    data = res.get("result", {})
+    exported = data.get("exported", [])
+    errors   = data.get("errors", [])
+
+    if errors:
+        for e in errors:
+            log(f"  ⚠ Export-Fehler {e['block']}: {e['error']}")
+    log(f"  {len(exported)} Bausteine exportiert nach {export_dir}")
+    return exported
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCHRITT 3 — XML-Dateien analysieren → Zugriffsliste
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Zugriffs-Typen
+READ      = "Read"
+WRITE     = "Write"
+READWRITE = "ReadWrite"
+
+def _merge_access(existing: str | None, new: str) -> str:
+    if existing is None:
+        return new
+    if existing == new:
+        return existing
+    return READWRITE
+
+
+def _parse_xml_file(xml_path: str) -> dict[tuple[str, str], str]:
+    """
+    Parst eine exportierte Baustein-XML und gibt zurück:
+      {(db_name, variable_name): "Read" | "Write" | "ReadWrite"}
+
+    Abgedeckte Fälle:
+      - SCL: direkte Memberzugriffe  "DB_Name".Variable
+      - FUP/LAD: <Access Scope="GlobalVariable"> Knoten
+      - Slice-Zugriffe (%X, %B, %W)
+      - Konstante Array-Indizes
+    """
+    try:
+        content = Path(xml_path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+
+    accesses: dict[tuple[str, str], str] = {}
+
+    # ── FUP/LAD XML-Analyse ───────────────────────────────────────────────────
+    # Muster: <Access Scope="GlobalVariable" ...>
+    #           <Symbol>
+    #             <Component Name="DB_Motor"/>
+    #             <Component Name="Drehzahl"/>
+    #           </Symbol>
+    #         </Access>
+    # Das Attribut "Informational" kennzeichnet reine Kommentar-Zugriffe → ignorieren
+    if "<Access " in content:
+        # Alle Access-Blöcke extrahieren
+        access_blocks = re.findall(
+            r'<Access\s[^>]*Scope="GlobalVariable"[^>]*>(.*?)</Access>',
+            content, re.DOTALL
+        )
+        for block in access_blocks:
+            # Informational-Zugriffe (nur Anzeigehinweise) ignorieren
+            if 'Informational="true"' in block:
+                continue
+
+            # Komponenten extrahieren
+            components = re.findall(r'<Component\s+Name="([^"]+)"', block)
+            if len(components) < 2:
+                continue
+
+            db_name  = components[0]
+            var_name = components[1]
+
+            # Array-Index anfügen wenn vorhanden (konstanter Index)
+            index_m = re.search(r'<Component\s+Name="\[(\d+)\]"', block)
+            if index_m:
+                var_name = f"{var_name}[{index_m.group(1)}]"
+
+            # Slice-Zugriff (%X3, %B0 etc.)
+            slice_m = re.search(r'<Access\s[^>]*Scope="LocalVariable"[^>]*>\s*<Symbol>\s*<Component Name="%([XBW])(\d+)"/>', block)
+            # (Slice nur als Hinweis — kein eigener Key)
+
+            # Write-Erkennung: Block liegt in einer Zuweisung / Spule
+            # Heuristik: übergeordnetes Element prüfen
+            # Im XML-Kontext: wenn Access in einem <Assignment> oder <Coil> steht → Write
+            # Einfachere Heuristik: Wenn der Block von einem Write-Indikator umgeben ist
+            is_write = _is_write_context_xml(content, block)
+
+            access_type = WRITE if is_write else READ
+            key = (db_name, var_name)
+            accesses[key] = _merge_access(accesses.get(key), access_type)
+
+    # ── SCL-Analyse ───────────────────────────────────────────────────────────
+    # SCL wird in <StructuredText> oder ähnlichen Tags gespeichert
+    scl_matches = re.findall(
+        r'<(?:StructuredText|Body|SourceText)>(.*?)</(?:StructuredText|Body|SourceText)>',
+        content, re.DOTALL
     )
-    for i, (name, width) in enumerate(cols, 1):
-        cell = ws.cell(row=1, column=i, value=name)
-        cell.font      = FONT_HEADER
-        cell.fill      = fill
-        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-        cell.border    = border
-        ws.column_dimensions[get_column_letter(i)].width = width
-    ws.row_dimensions[1].height = 18
+    for scl_block in scl_matches:
+        # CDATA entfernen
+        scl = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', scl_block, flags=re.DOTALL)
+        _parse_scl(scl, accesses)
+
+    return accesses
+
+
+def _is_write_context_xml(full_xml: str, access_block: str) -> bool:
+    """
+    Heuristik: Prüft ob ein Access-Block in einem schreibenden Kontext steht.
+    Write-Kontexte in TIA FUP/LAD XML:
+      - <Assignment> ... </Assignment>  (Zuweisung)
+      - <Coil> ... </Coil>              (Ausgangs-Spule)
+      - <SetCoil>, <ResetCoil>
+      - <Call> mit Output-Parameter     (schwieriger)
+    """
+    # Position des Blocks im Gesamt-XML finden
+    pos = full_xml.find(access_block[:60])  # ersten 60 Zeichen als Anker
+    if pos < 0:
+        return False
+
+    # 500 Zeichen vor dem Access-Block nach Write-Indikatoren suchen
+    context_before = full_xml[max(0, pos - 500):pos]
+    write_indicators = ["<Assignment", "<Coil", "<SetCoil", "<ResetCoil",
+                        "<MoveInstruction", 'Direction="Output"']
+    for indicator in write_indicators:
+        if indicator in context_before:
+            # Prüfen ob der Indikator noch "offen" ist (kein schließendes Tag)
+            tag_name = indicator.lstrip("<").split()[0].rstrip(">")
+            close_tag = f"</{tag_name}>"
+            last_open  = context_before.rfind(indicator)
+            last_close = context_before.rfind(close_tag)
+            if last_open > last_close:
+                return True
+    return False
+
+
+def _parse_scl(scl: str, accesses: dict) -> None:
+    """
+    Analysiert SCL-Quellcode auf DB-Zugriffe.
+
+    Write:    "DB".Var :=  oder  "DB".Var[i] :=
+    Read:     alles andere wo "DB".Var vorkommt
+    """
+    # Muster: "DB_Name".Member  (optional: .SubMember oder [Index])
+    # Gruppen: 1=DB-Name, 2=Variable (inkl. Subpath und Index)
+    pattern = re.compile(
+        r'"([A-Za-z0-9_]+)"\s*\.\s*([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*(?:\[\d+\])?)',
+        re.IGNORECASE
+    )
+
+    for m in pattern.finditer(scl):
+        db_name  = m.group(1)
+        var_name = m.group(2)
+
+        # Write-Erkennung: nach dem Match folgt ":=" (mit optionalem Whitespace)
+        after = scl[m.end():m.end() + 10].lstrip()
+        is_write = after.startswith(":=")
+
+        access_type = WRITE if is_write else READ
+        key = (db_name, var_name)
+        accesses[key] = _merge_access(accesses.get(key), access_type)
+
+
+def analyze_accesses(xml_files: list[str]) -> dict[tuple[str, str], str]:
+    """Analysiert alle XML-Dateien und aggregiert Zugriffe."""
+    all_accesses: dict[tuple[str, str], str] = {}
+    for xml_file in xml_files:
+        file_accesses = _parse_xml_file(xml_file)
+        for key, access in file_accesses.items():
+            all_accesses[key] = _merge_access(all_accesses.get(key), access)
+    return all_accesses
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCHRITT 4 — Excel schreiben
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_excel(
+    db_variables: list[dict],
+    accesses: dict[tuple[str, str], str],
+    output_path: str
+) -> None:
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise RuntimeError("openpyxl nicht installiert. Bitte: pip install openpyxl")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "DB_Variablen"
+
+    # ── Spalten ───────────────────────────────────────────────────────────────
+    COLS = [
+        ("DB",            18),
+        ("Gruppe",        22),
+        ("Variable",      28),
+        ("Datentyp",      14),
+        ("Zugriff",       14),
+        ("Ins HMI?",      10),
+        ("HMI-Tagname",   28),
+        ("Tabelle",       16),
+        ("Hi",            10),
+        ("Lo",            10),
+        ("Einheit",       10),
+        ("Archiv",        10),
+        ("Zykluszeit_ms", 14),
+    ]
+
+    # ── Farben ────────────────────────────────────────────────────────────────
+    COLOR_HEADER    = "1F4E79"   # Dunkelblau
+    COLOR_READ      = "E2EFDA"   # Hellgrün  → ins HMI vormarkiert
+    COLOR_WRITE     = "FCE4D6"   # Lachs     → nicht ins HMI
+    COLOR_READWRITE = "FFF2CC"   # Gelb      → manuell prüfen
+    COLOR_NONE      = "F2F2F2"   # Hellgrau  → nicht verwendet
+
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    header_font  = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
+    header_fill  = PatternFill("solid", fgColor=COLOR_HEADER)
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.row_dimensions[1].height = 30
+    for col_idx, (col_name, col_width) in enumerate(COLS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font   = header_font
+        cell.fill   = header_fill
+        cell.alignment = header_align
+        cell.border = border
+        ws.column_dimensions[get_column_letter(col_idx)].width = col_width
+
     ws.freeze_panes = "A2"
 
-def _write_rows(ws, rows: list[list], hint_cols: set[int] = None):
-    """Datenzeilen schreiben mit alternierenden Farben."""
-    hint_cols = hint_cols or set()
-    fill_alt  = PatternFill("solid", start_color=COLOR_ALT_ROW)
-    fill_hint = PatternFill("solid", start_color=COLOR_EMPTY_HINT)
-    fill_none = PatternFill(fill_type=None)
+    # ── Daten ─────────────────────────────────────────────────────────────────
+    default_align = Alignment(vertical="center")
 
-    for r_idx, row in enumerate(rows, 2):
-        is_alt = (r_idx % 2 == 0)
-        for c_idx, value in enumerate(row, 1):
-            cell       = ws.cell(row=r_idx, column=c_idx, value=value)
-            cell.font  = FONT_NORMAL
-            cell.alignment = Alignment(vertical="center")
-            if c_idx in hint_cols:
-                cell.fill = fill_hint
-            elif is_alt:
-                cell.fill = fill_alt
+    for row_idx, var in enumerate(db_variables, start=2):
+        db_name  = var.get("db", "")
+        gruppe   = var.get("gruppe", "")
+        var_name = var.get("variable", "")
+        dtype    = var.get("datatype", "")
+
+        # Zugriff ermitteln — normalisierter DB-Name-Abgleich
+        access = accesses.get((db_name, var_name))
+        # Fallback: nur ersten Teil bei Sub-Membern versuchen
+        if access is None and "." in var_name:
+            top = var_name.split(".")[0]
+            access = accesses.get((db_name, top))
+
+        access_str = access if access else "—"
+
+        # Vormarkierung "Ins HMI?"
+        ins_hmi = "ja" if access_str == READ else ""
+
+        # Zeilenfarbe
+        if access_str == READ:
+            row_color = COLOR_READ
+        elif access_str == WRITE:
+            row_color = COLOR_WRITE
+        elif access_str == READWRITE:
+            row_color = COLOR_READWRITE
+        else:
+            row_color = COLOR_NONE
+
+        row_fill = PatternFill("solid", fgColor=row_color)
+
+        values = [db_name, gruppe, var_name, dtype, access_str, ins_hmi,
+                  "", "", "", "", "", "", ""]
+
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.fill      = row_fill
+            cell.border    = border
+            cell.alignment = default_align
+            cell.font      = Font(name="Calibri", size=10)
+
+    # ── AutoFilter ────────────────────────────────────────────────────────────
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}{len(db_variables) + 1}"
+
+    # ── Legende ───────────────────────────────────────────────────────────────
+    ws_leg = wb.create_sheet("Legende")
+    legend = [
+        ("Farbe",     "Zugriff",   "Bedeutung"),
+        ("Grün",      "Read",      "Variable wird nur gelesen → ins HMI vormarkiert"),
+        ("Lachs",     "Write",     "Variable wird nur geschrieben → kein HMI-Tag nötig"),
+        ("Gelb",      "ReadWrite", "Variable wird gelesen UND geschrieben → manuell prüfen"),
+        ("Grau",      "—",         "Variable kommt in keinem Baustein vor → evtl. ungenutzt"),
+    ]
+    fills = [
+        PatternFill("solid", fgColor=COLOR_HEADER),
+        PatternFill("solid", fgColor=COLOR_READ),
+        PatternFill("solid", fgColor=COLOR_WRITE),
+        PatternFill("solid", fgColor=COLOR_READWRITE),
+        PatternFill("solid", fgColor=COLOR_NONE),
+    ]
+    for r, (row_data, fill) in enumerate(zip(legend, fills), start=1):
+        for c, val in enumerate(row_data, start=1):
+            cell = ws_leg.cell(row=r, column=c, value=val)
+            cell.fill = fill
+            if r == 1:
+                cell.font = Font(bold=True, color="FFFFFF", name="Calibri")
             else:
-                cell.fill = fill_none
+                cell.font = Font(name="Calibri", size=10)
+            cell.border = border
+    ws_leg.column_dimensions["A"].width = 12
+    ws_leg.column_dimensions["B"].width = 14
+    ws_leg.column_dimensions["C"].width = 55
 
-def _info_sheet(wb, project_name, plc_name, hmi_name, counts):
-    """Info-Sheet als erstes Sheet."""
-    ws = wb.active
-    ws.title = "Info"
-    ws.sheet_properties.tabColor = "375623"
-
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 45
-
-    def row(label, value, bold=False):
-        r = ws.max_row + 1
-        a = ws.cell(row=r, column=1, value=label)
-        b = ws.cell(row=r, column=2, value=value)
-        a.font = Font(name="Arial", bold=bold, size=10)
-        b.font = Font(name="Arial", bold=bold, size=10)
-        a.fill = PatternFill("solid", start_color="D9E1F2")
-
-    ws.append([])
-    row("TIA Portal MCP Export", "", bold=True)
-    row("Exportdatum",   datetime.now().strftime("%d.%m.%Y %H:%M"))
-    row("Projekt",       project_name)
-    row("PLC",           plc_name or "—")
-    row("HMI",           hmi_name or "—")
-    ws.append([])
-    row("Bausteine",     counts.get("blocks", 0))
-    row("PLC-Tags",      counts.get("plc_tags", 0))
-    row("DB-Variablen",  counts.get("db_vars", 0))
-    row("HMI-Tags",      counts.get("hmi_tags", 0))
-    ws.append([])
-    hint = ws.cell(row=ws.max_row + 1, column=1,
-                   value="Gelb markierte Spalten → manuell ausfüllen")
-    hint.font = FONT_HINT
-    hint2 = ws.cell(row=ws.max_row, column=2,
-                    value="(Hi-Limit, Lo-Limit, Einheit, ins HMI?)")
-    hint2.font = FONT_HINT
-
-# ── TIA-Daten lesen ────────────────────────────────────────────────────────────
-
-def _read_blocks(plc_name: str) -> list[dict]:
-    """Alle Bausteine iterativ lesen."""
-    code = """
-plc = find_software(plc_name, "PlcSoftware")
-if not plc:
-    result = []
-else:
-    stack = [(plc.BlockGroup, "")]
-    result = []
-    while stack:
-        group, path = stack.pop()
-        for block in group.Blocks:
-            lang = str(getattr(block, "ProgrammingLanguage", "?"))
-            result.append({
-                "name":   block.Name,
-                "number": getattr(block, "Number", None),
-                "type":   type(block).__name__.replace("Plc","").replace("Block",""),
-                "lang":   lang,
-                "path":   path or "/",
-            })
-        for sub in group.Groups:
-            stack.append((sub, (path + "/" + sub.Name).lstrip("/")))
-""".replace("plc_name", repr(plc_name))
-    r = tia.execute_openness(code, mode="read")
-    return r.get("result") or []
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_path)
+    log(f"Excel gespeichert: {output_path}")
+    log(f"  {len(db_variables)} Variablen, "
+        f"{sum(1 for v in db_variables if accesses.get((v['db'], v['variable'])) == READ)} als Read vormarkiert")
 
 
-def _read_plc_tags(plc_name: str) -> list[dict]:
-    """Alle PLC-Tag-Tabellen lesen."""
-    code = """
-plc = find_software(plc_name, "PlcSoftware")
-if not plc:
-    result = []
-else:
-    result = []
-    for table in plc.TagTableGroup.TagTables:
-        for tag in table.Tags:
-            comment = ""
-            try:
-                items = tag.Comment.Items
-                if items and items.Count > 0:
-                    comment = str(items[0].Text)
-            except Exception:
-                pass
-            result.append({
-                "table":   table.Name,
-                "name":    tag.Name,
-                "type":    str(getattr(tag, "DataTypeName", "?")),
-                "address": str(getattr(tag, "LogicalAddress", "")),
-                "comment": comment,
-            })
-""".replace("plc_name", repr(plc_name))
-    r = tia.execute_openness(code, mode="read")
-    return r.get("result") or []
-
-
-def _read_db_vars(plc_name: str, export_dir: str) -> list[dict]:
-    """
-    Alle DBs exportieren und DB-Variablen aus XML parsen.
-    Gibt Liste mit DB-Name, Variable, Typ, Startadresse, Kommentar zurück.
-    """
-    # 1. DB-Namen sammeln
-    code = """
-plc = find_software(plc_name, "PlcSoftware")
-if not plc:
-    result = []
-else:
-    result = []
-    stack = [(plc.BlockGroup, "")]
-    while stack:
-        group, path = stack.pop()
-        for block in group.Blocks:
-            if "Db" in type(block).__name__ or "DataBlock" in type(block).__name__:
-                result.append(block.Name)
-        for sub in group.Groups:
-            stack.append((sub, path))
-""".replace("plc_name", repr(plc_name))
-    r   = tia.execute_openness(code, mode="read")
-    dbs = r.get("result") or []
-
-    if not dbs:
-        return []
-
-    # 2. Jeden DB exportieren und parsen
-    Path(export_dir).mkdir(parents=True, exist_ok=True)
-    all_vars = []
-
-    for db_name in dbs:
-        try:
-            res = tia.export_plc_block(plc_name, db_name, export_dir)
-            xml_path = res.get("xml_path")
-            if xml_path and Path(xml_path).exists():
-                vars_ = _parse_db_xml(db_name, xml_path)
-                all_vars.extend(vars_)
-        except Exception as e:
-            print(f"  ⚠  DB '{db_name}' konnte nicht exportiert werden: {e}")
-
-    return all_vars
-
-
-def _parse_db_xml(db_name: str, xml_path: str) -> list[dict]:
-    """TIA-DB-XML parsen → Variablenliste."""
-    vars_ = []
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        # Namespace ermitteln
-        ns = ""
-        if root.tag.startswith("{"):
-            ns = root.tag.split("}")[0] + "}"
-
-        def tag(name): return f"{ns}{name}"
-
-        # Alle Member-Elemente suchen (DB-Variablen)
-        for member in root.iter(tag("Member")):
-            name    = member.get("Name", "")
-            dtype   = member.get("Datatype", "")
-            version = member.get("Version", "")
-            # Startoffset aus AttributeList
-            offset  = ""
-            comment = ""
-            attr    = member.find(tag("AttributeList"))
-            if attr is not None:
-                off_el = attr.find(tag("StartValue"))
-                if off_el is not None:
-                    offset = off_el.text or ""
-            # Kommentar
-            comment_el = member.find(f".//{tag('MultiLanguageText')}")
-            if comment_el is not None:
-                comment = comment_el.text or ""
-
-            if name and dtype:
-                vars_.append({
-                    "db":      db_name,
-                    "name":    name,
-                    "type":    dtype,
-                    "version": version,
-                    "comment": comment.strip(),
-                })
-    except Exception as e:
-        print(f"  ⚠  XML-Parse-Fehler {db_name}: {e}")
-    return vars_
-
-
-def _read_hmi_tags(hmi_name: str) -> list[dict]:
-    """HMI-Tags lesen — leer falls HMI noch nicht existiert."""
-    if not hmi_name:
-        return []
-    try:
-        r = tia.list_hmi_tags(hmi_name)
-        return r.get("tags") or []
-    except Exception:
-        return []
-
-# ── Excel schreiben ────────────────────────────────────────────────────────────
-
-def _sheet_blocks(wb, blocks: list[dict]):
-    ws = wb.create_sheet("Bausteine")
-    ws.sheet_properties.tabColor = COLOR_SHEET_TAB
-    cols = [
-        ("Name",        28),
-        ("Typ",         10),
-        ("Nummer",       9),
-        ("Sprache",     14),
-        ("Ordner",      35),
-    ]
-    _header_row(ws, cols)
-    rows = [
-        [b["name"], b["type"], b["number"], b["lang"], b["path"]]
-        for b in sorted(blocks, key=lambda x: (x["path"], x["name"]))
-    ]
-    _write_rows(ws, rows)
-    ws.auto_filter.ref = f"A1:E{len(rows)+1}"
-
-
-def _sheet_plc_tags(wb, tags: list[dict]):
-    ws = wb.create_sheet("PLC_Tags")
-    ws.sheet_properties.tabColor = COLOR_SHEET_TAB
-    cols = [
-        ("Tag-Tabelle",  22),
-        ("Name",         30),
-        ("Datentyp",     14),
-        ("Adresse",      14),
-        ("Kommentar",    40),
-        ("Hi-Limit",     12),   # manuell
-        ("Lo-Limit",     12),   # manuell
-        ("Einheit",      12),   # manuell
-        ("Ins HMI?",     10),   # manuell
-    ]
-    _header_row(ws, cols)
-    rows = [
-        [t["table"], t["name"], t["type"], t["address"], t["comment"],
-         None, None, None, None]
-        for t in tags
-    ]
-    # Spalten 6-9 gelb (Hi, Lo, Einheit, Ins HMI)
-    _write_rows(ws, rows, hint_cols={6, 7, 8, 9})
-    ws.auto_filter.ref = f"A1:I{len(rows)+1}"
-
-
-def _sheet_db_vars(wb, vars_: list[dict]):
-    ws = wb.create_sheet("DB_Variablen")
-    ws.sheet_properties.tabColor = COLOR_SHEET_TAB
-    cols = [
-        ("DB",           22),
-        ("Variable",     30),
-        ("Datentyp",     18),
-        ("Kommentar",    40),
-        ("Hi-Limit",     12),   # manuell
-        ("Lo-Limit",     12),   # manuell
-        ("Einheit",      12),   # manuell
-        ("Ins HMI?",     10),   # manuell
-        ("HMI-Tagname",  28),   # manuell / generiert
-    ]
-    _header_row(ws, cols)
-    rows = [
-        [v["db"], v["name"], v["type"], v["comment"],
-         None, None, None, None, None]
-        for v in vars_
-    ]
-    _write_rows(ws, rows, hint_cols={5, 6, 7, 8, 9})
-    ws.auto_filter.ref = f"A1:I{len(rows)+1}"
-
-
-def _sheet_hmi_tags(wb, tags: list[dict]):
-    ws = wb.create_sheet("HMI_Tags")
-    ws.sheet_properties.tabColor = COLOR_SHEET_TAB
-    if not tags:
-        ws["A1"] = "Noch keine HMI-Tags vorhanden — wird nach HMI-Erstellung befüllt."
-        ws["A1"].font = FONT_HINT
-        ws.column_dimensions["A"].width = 60
-        return
-    cols = [
-        ("Tag-Tabelle",  22),
-        ("Name",         30),
-        ("Datentyp",     14),
-        ("Hi-Limit",     12),
-        ("Lo-Limit",     12),
-        ("Archiv",       10),
-    ]
-    _header_row(ws, cols)
-    rows = [
-        [t.get("table",""), t.get("name",""), t.get("type",""),
-         t.get("high",""), t.get("low",""), t.get("archive","")]
-        for t in tags
-    ]
-    _write_rows(ws, rows)
-    ws.auto_filter.ref = f"A1:F{len(rows)+1}"
-
-
-def _sheet_screens(wb):
-    """Leeres Screen-Planungs-Sheet."""
-    ws = wb.create_sheet("Screens_Planung")
-    ws.sheet_properties.tabColor = "7030A0"
-    cols = [
-        ("Screenname",    25),
-        ("Vorlage",       18),
-        ("Titel",         30),
-        ("Zugeordnete DBs", 35),
-        ("Auflösung",     14),
-        ("Bemerkung",     35),
-    ]
-    _header_row(ws, cols, color="7030A0")
-    # Hinweiszeile
-    hints = [
-        ["Startbild",          "Start",    "Anlage XY",       "",          "1280x1024", "Hauptnavigation"],
-        ["Antriebe_Uebersicht","Uebersicht","Antriebe",       "DB_Motor*", "1280x1024", ""],
-        ["Motor1",             "Antrieb",  "Motor 1",         "DB_Motor1", "1280x1024", ""],
-    ]
-    fill_hint = PatternFill("solid", start_color=COLOR_EMPTY_HINT)
-    for r_idx, row in enumerate(hints, 2):
-        for c_idx, val in enumerate(row, 1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=val)
-            cell.font = Font(name="Arial", size=10, italic=True, color="7F7F7F")
-            cell.fill = fill_hint
-    note = ws.cell(row=ws.max_row + 2, column=1,
-                   value="↑ Beispielzeilen — ersetzen oder ergänzen")
-    note.font = FONT_HINT
-
-# ── Hauptprogramm ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="TIA Portal → Excel Export")
-    parser.add_argument("--output", default=DEFAULT_OUTPUT,
-                        help=f"Ausgabepfad (Standard: {DEFAULT_OUTPUT})")
-    parser.add_argument("--plc",    default="PLC_1",
-                        help="DeviceItem-Name der SPS (Standard: PLC_1)")
-    parser.add_argument("--hmi",    default="",
-                        help="DeviceItem-Name des HMI (leer = kein HMI)")
-    parser.add_argument("--no-db-export", action="store_true",
-                        help="DB-Variablen-Export überspringen (schneller)")
+    parser = argparse.ArgumentParser(description="TIA Export — DB-Variablen mit Querverweisanalyse")
+    parser.add_argument("--device", default=DEFAULT_DEVICE,
+                        help="DeviceItem-Name der SPS (leer = erstes PLC im Projekt)")
+    parser.add_argument("--out", default=DEFAULT_OUT,
+                        help="Ausgabepfad für die Excel-Datei")
+    parser.add_argument("--xml-dir", default=EXPORT_TMP,
+                        help="Temporärer Ordner für XML-Exporte")
+    parser.add_argument("--keep-xml", action="store_true",
+                        help="XML-Dateien nach Analyse nicht löschen")
     args = parser.parse_args()
 
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print("\n═══════════════════════════════════════════════════")
+    print("  TIA Export — DB-Variablen + Querverweis")
+    print("═══════════════════════════════════════════════════\n")
 
-    print("═" * 60)
-    print("  TIA Portal → Excel Export")
-    print("═" * 60)
-
-    # ── TIA verbinden ──────────────────────────────────────────────────────────
-    print("\n[1/6] TIA Portal verbinden ...")
+    # ── TIA verbinden ─────────────────────────────────────────────────────────
+    log("Verbinde mit TIA Portal...")
     tia.setup()
-    tia.connect_portal("attach")
-    proj_info = tia.attach_project()
-    project_name = proj_info.get("project", "Unbekannt")
-    print(f"      Projekt: {project_name}")
+    try:
+        r = tia.connect_portal(mode="attach")
+        log(f"Portal: {r.get('tia_version', '?')} (PID {r.get('process_id', '?')})")
+    except TiaError as e:
+        print(f"\nFEHLER: {e.message}")
+        sys.exit(1)
 
-    # ── Bausteine lesen ────────────────────────────────────────────────────────
-    print(f"\n[2/6] Bausteine lesen ({args.plc}) ...")
-    blocks = _read_blocks(args.plc)
-    print(f"      {len(blocks)} Bausteine gefunden")
+    try:
+        r = tia.attach_project()
+        log(f"Projekt: {r.get('project', '?')}")
+    except TiaError as e:
+        print(f"\nFEHLER: {e.message}")
+        sys.exit(1)
 
-    # ── PLC-Tags lesen ─────────────────────────────────────────────────────────
-    print(f"\n[3/6] PLC-Tags lesen ...")
-    plc_tags = _read_plc_tags(args.plc)
-    print(f"      {len(plc_tags)} Tags gefunden")
+    # ── Schritt 1: DB-Variablen lesen ─────────────────────────────────────────
+    log("\n[1/3] Lese DB-Variablen...")
+    try:
+        db_vars = read_db_variables(args.device)
+        log(f"  {len(db_vars)} Variablen aus {len({v['db'] for v in db_vars})} DBs gelesen")
+    except Exception as e:
+        print(f"\nFEHLER beim Lesen der DBs: {e}")
+        tia.teardown()
+        sys.exit(1)
 
-    # ── DB-Variablen lesen ─────────────────────────────────────────────────────
-    db_vars = []
-    if not args.no_db_export:
-        print(f"\n[4/6] DB-Variablen exportieren und lesen ...")
-        db_vars = _read_db_vars(args.plc, TEMP_EXPORT_DIR)
-        print(f"      {len(db_vars)} DB-Variablen gefunden")
-    else:
-        print(f"\n[4/6] DB-Export übersprungen (--no-db-export)")
+    # ── Schritt 2: Bausteine exportieren ──────────────────────────────────────
+    log("\n[2/3] Exportiere Bausteine für Querverweis-Analyse...")
+    try:
+        xml_files = export_all_blocks(args.device, args.xml_dir)
+    except Exception as e:
+        print(f"\nFEHLER beim Export: {e}")
+        tia.teardown()
+        sys.exit(1)
 
-    # ── HMI-Tags lesen ─────────────────────────────────────────────────────────
-    print(f"\n[5/6] HMI-Tags lesen ({args.hmi or 'kein HMI angegeben'}) ...")
-    hmi_tags = _read_hmi_tags(args.hmi)
-    print(f"      {len(hmi_tags)} HMI-Tags gefunden")
+    # ── Schritt 3: Zugriffe analysieren ───────────────────────────────────────
+    log("\n[2/3] Analysiere Zugriffe...")
+    accesses = analyze_accesses(xml_files)
+    log(f"  {len(accesses)} DB-Zugriffe gefunden")
 
-    # ── Excel schreiben ────────────────────────────────────────────────────────
-    print(f"\n[6/6] Excel schreiben → {output_path} ...")
-    wb = Workbook()
+    # Statistik
+    read_count  = sum(1 for v in accesses.values() if v == READ)
+    write_count = sum(1 for v in accesses.values() if v == WRITE)
+    rw_count    = sum(1 for v in accesses.values() if v == READWRITE)
+    log(f"  Read: {read_count}  Write: {write_count}  ReadWrite: {rw_count}")
 
-    counts = {
-        "blocks":   len(blocks),
-        "plc_tags": len(plc_tags),
-        "db_vars":  len(db_vars),
-        "hmi_tags": len(hmi_tags),
-    }
-    _info_sheet(wb, project_name, args.plc, args.hmi or None, counts)
-    _sheet_blocks(wb, blocks)
-    _sheet_plc_tags(wb, plc_tags)
-    _sheet_db_vars(wb, db_vars)
-    _sheet_hmi_tags(wb, hmi_tags)
-    _sheet_screens(wb)
+    # Temporäre XML-Dateien aufräumen
+    if not args.keep_xml:
+        cleaned = 0
+        for f in xml_files:
+            try:
+                Path(f).unlink()
+                cleaned += 1
+            except Exception:
+                pass
+        if cleaned:
+            log(f"  {cleaned} temporäre XML-Dateien gelöscht (--keep-xml zum Behalten)")
 
-    wb.save(str(output_path))
+    # ── Schritt 4: Excel schreiben ────────────────────────────────────────────
+    log("\n[3/3] Schreibe Excel...")
+    try:
+        write_excel(db_vars, accesses, args.out)
+    except Exception as e:
+        print(f"\nFEHLER beim Excel-Export: {e}")
+        tia.teardown()
+        sys.exit(1)
+
     tia.teardown()
-
-    print("\n" + "═" * 60)
-    print(f"  Fertig: {output_path}")
-    print(f"  Bausteine:     {counts['blocks']}")
-    print(f"  PLC-Tags:      {counts['plc_tags']}")
-    print(f"  DB-Variablen:  {counts['db_vars']}")
-    print(f"  HMI-Tags:      {counts['hmi_tags']}")
-    print("═" * 60)
-    print("\n  Nächster Schritt:")
-    print("  → Sheet 'DB_Variablen': Hi/Lo-Limits und Einheiten eintragen")
-    print("  → Sheet 'Screens_Planung': gewünschte Screens definieren")
-    print("  → 'Ins HMI?' Spalte: 'ja' für relevante Tags eintragen")
+    print("\n✓ Fertig.\n")
 
 
 if __name__ == "__main__":

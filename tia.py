@@ -1068,3 +1068,707 @@ def save_project():
         _log("session").info(f"Projekt gespeichert: {name}")
         return {"status": "ok", "project": name, "path": path}
     return sta.run(_tia_call, _run)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BIBLIOTHEK — Öffnen, Suchen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def find_libraries(folder):
+    """
+    Durchsucht einen Ordner nach globalen TIA-Bibliotheken (.al*).
+    Gibt Name, Pfad und erkannte TIA-Version zurück.
+    Hilfreich um die richtige Bibliotheksdatei für die aktuelle TIA-Version zu finden.
+    """
+    import re
+    p = Path(folder)
+    if not p.exists():
+        raise TiaError("FOLDER_NOT_FOUND", f"Ordner nicht gefunden: {folder}", True)
+
+    result = []
+    # .al18 / .al19 / .al20 / .al21 usw.
+    for f in sorted(p.glob("*.al*")):
+        m = re.search(r"\.al(\d+)$", f.suffix, re.IGNORECASE)
+        if m:
+            ver = f"V{m.group(1)}"
+            result.append({
+                "name":    f.stem,
+                "path":    str(f),
+                "version": ver,
+                "match":   ver == _sess.tia_version,  # passt zur laufenden TIA-Version
+            })
+
+    _log("library").info(f"find_libraries {folder}: {len(result)} Bibliotheken")
+    return {
+        "status":        "ok",
+        "folder":        folder,
+        "tia_version":   _sess.tia_version,
+        "libraries":     result,
+        "count":         len(result),
+    }
+
+
+def open_library(path_or_folder, name_hint=None):
+    """
+    Öffnet eine globale TIA-Bibliothek.
+
+    path_or_folder:
+        Vollständiger Dateipfad (.al21 etc.) — wird direkt geöffnet.
+        Oder Ordnerpfad — sucht automatisch die Datei die zur
+        laufenden TIA-Version passt. name_hint hilft bei mehreren Treffer.
+
+    name_hint: optionaler Teilname z.B. "Antriebe" um bei mehreren
+               Bibliotheken im Ordner die richtige zu wählen.
+    """
+    def _run():
+        _sess.ensure_portal()
+        from System.IO import FileInfo
+        import re
+
+        p = Path(path_or_folder)
+
+        # Vollständiger Dateipfad — direkt öffnen
+        if p.is_file():
+            target = p
+        else:
+            # Ordner — passende Version suchen
+            if not p.is_dir():
+                raise TiaError("PATH_NOT_FOUND",
+                    f"Pfad nicht gefunden: {path_or_folder}", True)
+
+            ver_num = _sess.tia_version.lstrip("V") if _sess.tia_version else ""
+            pattern = f"*.al{ver_num}" if ver_num else "*.al*"
+            candidates = list(p.glob(pattern))
+
+            if not candidates:
+                # Fallback: alle .al* Dateien
+                candidates = [f for f in p.glob("*.al*")
+                              if re.search(r"\.al\d+$", f.suffix, re.IGNORECASE)]
+
+            if name_hint:
+                candidates = [f for f in candidates
+                              if name_hint.lower() in f.stem.lower()]
+
+            if not candidates:
+                raise TiaError("LIBRARY_NOT_FOUND",
+                    f"Keine passende Bibliothek in {path_or_folder} "
+                    f"für TIA {_sess.tia_version} gefunden.", True,
+                    {"searched": pattern, "hint": name_hint})
+
+            if len(candidates) > 1:
+                raise TiaError("LIBRARY_AMBIGUOUS",
+                    f"Mehrere Bibliotheken gefunden — name_hint angeben.",
+                    True, {"found": [str(c) for c in candidates]})
+
+            target = candidates[0]
+
+        # Prüfen ob bereits geöffnet
+        for gl in _sess.portal.GlobalLibraries:
+            if Path(str(gl.Path)) == target:
+                _log("library").info(f"Bibliothek bereits offen: {target.name}")
+                return {"status": "ok", "name": gl.Name,
+                        "path": str(target), "already_open": True}
+
+        lib = _sess.portal.GlobalLibraries.Open(FileInfo(str(target)))
+        _log("library").info(f"Bibliothek geöffnet: {target.name}")
+        return {
+            "status":       "ok",
+            "name":         lib.Name,
+            "path":         str(target),
+            "already_open": False,
+            "types":        lib.TypeFolder.Types.Count,
+            "copies":       lib.MasterCopyFolder.MasterCopies.Count,
+        }
+    return sta.run(_tia_call, _run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UDTs lesen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def list_plc_udts(device_name):
+    """
+    Alle UDTs (PlcType) der PLC als JSON mit vollständiger Memberstruktur.
+    Felder je Member: name, data_type, default_value, comment, offset
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        udts = []
+        stack = [(plc.BlockGroup, "")]
+        while stack:
+            group, path = stack.pop()
+            for block in group.Blocks:
+                # PlcType = UDT, PlcTypeComposition = strukturierter UDT
+                raw = type(block).__name__
+                if "PlcType" not in raw:
+                    continue
+
+                members = []
+                try:
+                    for m in block.Interface.Members:
+                        comment = None
+                        try:
+                            ml = m.Comment
+                            if ml and ml.Items.Count > 0:
+                                comment = str(ml.Items[0].Text)
+                        except Exception:
+                            pass
+                        members.append({
+                            "name":          m.Name,
+                            "data_type":     str(getattr(m, "Datatype", "?")),
+                            "default_value": str(getattr(m, "StartValue", "") or ""),
+                            "comment":       comment,
+                            "offset":        str(getattr(m, "Offset", "") or ""),
+                        })
+                except Exception as e:
+                    members = [{"error": str(e)}]
+
+                udts.append({
+                    "name":    block.Name,
+                    "number":  getattr(block, "Number", None),
+                    "path":    path,
+                    "members": members,
+                    "member_count": len(members),
+                })
+
+            for sub in group.Groups:
+                stack.append((sub, f"{path}/{sub.Name}".lstrip("/")))
+
+        _log("plc").info(f"list_plc_udts {device_name}: {len(udts)} UDTs")
+        return {
+            "status": "ok",
+            "device": device_name,
+            "udts":   udts,
+            "count":  len(udts),
+        }
+    return sta.run(_tia_call, _run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Bibliothekstyp in PLC instanziieren
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def use_library_type(device_name, library_name, type_name, group_path=None):
+    """
+    Instanziiert einen Bibliothekstyp (UDT, FB, FC) im PLC.
+    Verwendet die Standardversion des Typs.
+
+    group_path: optionaler Zielordner im PLC, z.B. "Antriebe".
+                Leer = BlockGroup (Wurzel).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        # Zielgruppe ermitteln
+        target_group = plc.BlockGroup
+        if group_path:
+            for part in group_path.strip("/").split("/"):
+                found = None
+                for sub in target_group.Groups:
+                    if sub.Name == part:
+                        found = sub
+                        break
+                if not found:
+                    # Gruppe anlegen wenn nicht vorhanden
+                    found = target_group.Groups.Create(part)
+                    _log("plc").info(f"Gruppe angelegt: {part}")
+                target_group = found
+
+        # Bibliothek suchen (Projekt + global)
+        lib, scope = _find_lib(library_name)
+
+        # Typ suchen
+        types_list = []
+        _collect_types(lib.TypeFolder, types_list)
+        match = next((t for t in types_list if t["name"] == type_name), None)
+        if not match:
+            raise TiaError("TYPE_NOT_FOUND",
+                f"Typ '{type_name}' in Bibliothek '{library_name}' nicht gefunden.", True,
+                {"available": [t["name"] for t in types_list]})
+
+        # Typ-Objekt aus Bibliothek holen und Standardversion instanziieren
+        def _find_type_obj(folder):
+            for t in folder.Types:
+                if t.Name == type_name:
+                    return t
+            for sub in folder.Folders:
+                r = _find_type_obj(sub)
+                if r: return r
+            return None
+
+        type_obj = _find_type_obj(lib.TypeFolder)
+        if not type_obj:
+            raise TiaError("TYPE_NOT_FOUND",
+                f"Typ '{type_name}' nicht gefunden.", True)
+
+        version = type_obj.DefaultVersion
+        if not version:
+            raise TiaError("NO_DEFAULT_VERSION",
+                f"Typ '{type_name}' hat keine Standardversion.", True)
+
+        # In Zielgruppe instanziieren
+        target_group.Blocks.CreateFrom(version)
+        _log("plc").info(
+            f"Typ '{type_name}' v{match['default_version']} "
+            f"aus '{library_name}' in '{device_name}/{group_path or ''}' instanziiert")
+
+        return {
+            "status":   "ok",
+            "device":   device_name,
+            "library":  library_name,
+            "type":     type_name,
+            "version":  match["default_version"],
+            "group":    group_path or "(root)",
+        }
+    return sta.run(_tia_call, _run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLC-Tags anlegen / schreiben
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_plc_tag(device_name, table_name, tag_name,
+                   data_type, address=None, comment=None):
+    """
+    Einzelnen PLC-Tag anlegen.
+    table_name: Tabelle muss existieren (vorher list_plc_tag_tables prüfen).
+    data_type:  z.B. "Bool", "Int", "Real", "DWord", "UDT_Antrieb"
+    address:    z.B. "%M0.0", "%MW10" — optional
+    comment:    optional
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        # Tabelle suchen
+        table = None
+        stack = [(plc.TagTableGroup, "")]
+        while stack:
+            group, _ = stack.pop()
+            for t in group.TagTables:
+                if t.Name == table_name:
+                    table = t
+                    break
+            if table:
+                break
+            try:
+                for sub in group.Groups:
+                    stack.append((sub, ""))
+            except Exception:
+                pass
+
+        if not table:
+            raise TiaError("TABLE_NOT_FOUND",
+                f"Tag-Tabelle '{table_name}' nicht gefunden.", True)
+
+        tag = table.Tags.Create(tag_name, data_type)
+
+        if address:
+            tag.LogicalAddress = address
+
+        if comment:
+            try:
+                tag.Comment.Items[0].Text = comment
+            except Exception:
+                pass
+
+        _log("plc").info(f"PLC-Tag angelegt: {table_name}.{tag_name} ({data_type})")
+        return {
+            "status":    "ok",
+            "device":    device_name,
+            "table":     table_name,
+            "tag":       tag_name,
+            "data_type": data_type,
+            "address":   address,
+            "comment":   comment,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def create_plc_tag_table(device_name, table_name):
+    """
+    Neue PLC Tag-Tabelle anlegen.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        table = plc.TagTableGroup.TagTables.Create(table_name)
+        _log("plc").info(f"Tag-Tabelle angelegt: {table_name}")
+        return {"status": "ok", "device": device_name, "table": table_name}
+    return sta.run(_tia_call, _run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HMI-Tags anlegen / schreiben
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_hmi_tag(device_name, table_name, tag_name, data_type,
+                   plc_tag=None, high_limit=None, low_limit=None,
+                   logging_enabled=False, comment=None):
+    """
+    Einzelnen HMI-Tag anlegen.
+    table_name:      Tabelle muss existieren.
+    data_type:       z.B. "Int", "Real", "Bool"
+    plc_tag:         Verknüpfung mit PLC-Tag, z.B. "PLC_1.DB1.Motor1_Drehzahl"
+    high_limit:      oberer Grenzwert (für analoge Tags)
+    low_limit:       unterer Grenzwert
+    logging_enabled: Archivierung ein/aus
+    comment:         optional
+    """
+    def _run():
+        _sess.ensure_project()
+
+        sw, ht = _get_hmi(device_name)
+
+        # Tabelle suchen
+        table = None
+        for t in sw.TagTableGroup.TagTables:
+            if t.Name == table_name:
+                table = t
+                break
+
+        if not table:
+            raise TiaError("TABLE_NOT_FOUND",
+                f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True,
+                {"available": [t.Name for t in sw.TagTableGroup.TagTables]})
+
+        tag = table.Tags.Create(tag_name, data_type)
+
+        if plc_tag:
+            try:
+                tag.PlcTag = plc_tag
+            except Exception:
+                pass
+
+        if high_limit is not None:
+            try:
+                tag.HighLimit = high_limit
+            except Exception:
+                pass
+
+        if low_limit is not None:
+            try:
+                tag.LowLimit = low_limit
+            except Exception:
+                pass
+
+        try:
+            tag.LoggingEnabled = logging_enabled
+        except Exception:
+            pass
+
+        if comment:
+            try:
+                tag.Comment = comment
+            except Exception:
+                pass
+
+        _log("hmi").info(
+            f"HMI-Tag angelegt: {device_name}/{table_name}.{tag_name} ({data_type})")
+        return {
+            "status":           "ok",
+            "device":           device_name,
+            "hmi_type":         ht,
+            "table":            table_name,
+            "tag":              tag_name,
+            "data_type":        data_type,
+            "plc_tag":          plc_tag,
+            "high_limit":       high_limit,
+            "low_limit":        low_limit,
+            "logging_enabled":  logging_enabled,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def create_hmi_tag_table(device_name, table_name):
+    """
+    Neue HMI Tag-Tabelle anlegen.
+    """
+    def _run():
+        _sess.ensure_project()
+        sw, ht = _get_hmi(device_name)
+        sw.TagTableGroup.TagTables.Create(table_name)
+        _log("hmi").info(f"HMI Tag-Tabelle angelegt: {device_name}/{table_name}")
+        return {"status": "ok", "device": device_name,
+                "hmi_type": ht, "table": table_name}
+    return sta.run(_tia_call, _run)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUERVERWEISE & UNGENUTZTE TAGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_cross_references(device_name, symbol):
+    """
+    Alle Verwendungsstellen eines Symbols (Tag, Baustein, DB-Variable) in der PLC.
+
+    symbol: z.B. "Motor1_Start", "FB_Antrieb", "DB1", "UDT_Antrieb"
+
+    Rückgabe je Treffer:
+        block, block_type, language, usage (Read/Write/ReadWrite/Call), location
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        refs = []
+        try:
+            xref_data = plc.CrossReferenceData
+            # Alle Querverweise durchsuchen
+            for item in xref_data:
+                try:
+                    # Symbol-Name prüfen
+                    sym = str(getattr(item, "Symbol", "") or "")
+                    name = str(getattr(item, "Name", "") or "")
+                    if symbol.lower() not in sym.lower() and \
+                       symbol.lower() not in name.lower():
+                        continue
+
+                    refs.append({
+                        "block":      str(getattr(item, "BlockName",    "") or ""),
+                        "block_type": str(getattr(item, "BlockType",    "") or ""),
+                        "language":   str(getattr(item, "Language",     "") or ""),
+                        "usage":      str(getattr(item, "UseType",      "") or ""),
+                        "location":   str(getattr(item, "Location",     "") or ""),
+                        "symbol":     sym or name,
+                    })
+                except Exception:
+                    pass
+        except Exception as e:
+            # Fallback: CrossReferenceData nicht verfügbar
+            raise TiaError("XREF_NOT_AVAILABLE",
+                f"Querverweise nicht verfügbar: {e}", False,
+                {"hint": "TIA Portal muss kompiliert sein"})
+
+        _log("plc").info(
+            f"get_cross_references {device_name}/{symbol}: {len(refs)} Treffer")
+        return {
+            "status":  "ok",
+            "device":  device_name,
+            "symbol":  symbol,
+            "refs":    refs,
+            "count":   len(refs),
+        }
+    return sta.run(_tia_call, _run)
+
+
+def find_unused_plc_tags(device_name):
+    """
+    Findet alle PLC-Tags die in keinem Baustein verwendet werden.
+    Nutzt CrossReferenceData — PLC muss kompiliert sein.
+
+    Rückgabe je ungenutztem Tag:
+        name, data_type, logical_address, table
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        # Alle verwendeten Symbolnamen aus CrossReferenceData sammeln
+        used_symbols = set()
+        try:
+            for item in plc.CrossReferenceData:
+                try:
+                    sym = str(getattr(item, "Symbol", "") or "")
+                    if sym:
+                        used_symbols.add(sym.lower())
+                except Exception:
+                    pass
+        except Exception as e:
+            raise TiaError("XREF_NOT_AVAILABLE",
+                f"Querverweise nicht verfügbar: {e}", False,
+                {"hint": "Erst compile_plc aufrufen"})
+
+        # Alle Tags durchgehen und mit used_symbols vergleichen
+        unused = []
+        stack = [(plc.TagTableGroup, "")]
+        while stack:
+            group, _ = stack.pop()
+            for table in group.TagTables:
+                for tag in table.Tags:
+                    if tag.Name.lower() not in used_symbols:
+                        unused.append({
+                            "name":            tag.Name,
+                            "data_type":       str(getattr(tag, "DataTypeName", "?")),
+                            "logical_address": str(getattr(tag, "LogicalAddress", "") or ""),
+                            "table":           table.Name,
+                        })
+            try:
+                for sub in group.Groups:
+                    stack.append((sub, ""))
+            except Exception:
+                pass
+
+        _log("plc").info(
+            f"find_unused_plc_tags {device_name}: {len(unused)} ungenutzte Tags")
+        return {
+            "status":  "ok",
+            "device":  device_name,
+            "unused":  unused,
+            "count":   len(unused),
+            "hint":    "Bitte Liste prüfen bevor delete_plc_tag aufgerufen wird.",
+        }
+    return sta.run(_tia_call, _run)
+
+
+def find_unused_hmi_tags(device_name):
+    """
+    Findet alle HMI-Tags die in keinem Screen verwendet werden.
+    Gibt Name, Datentyp und Tabelle zurück.
+
+    Hinweis: HMI-Querverweise sind über CrossReferenceData des HMI-Objekts
+    verfügbar — Verfügbarkeit hängt vom HMI-Typ ab.
+    """
+    def _run():
+        _sess.ensure_project()
+        sw, ht = _get_hmi(device_name)
+
+        # Verwendete Tags aus HMI-CrossReferenceData
+        used_symbols = set()
+        try:
+            for item in sw.CrossReferenceData:
+                try:
+                    sym = str(getattr(item, "Symbol", "") or "")
+                    name = str(getattr(item, "Name",   "") or "")
+                    s = sym or name
+                    if s:
+                        used_symbols.add(s.lower())
+                except Exception:
+                    pass
+        except Exception:
+            # Fallback: CrossReferenceData nicht verfügbar beim HMI-Typ
+            # In diesem Fall alle Tags als "potenziell ungenutzt" melden
+            _log("hmi").warning(
+                f"HMI CrossReferenceData nicht verfügbar für {device_name} "
+                f"({ht}) — alle Tags werden gelistet")
+
+        unused = []
+        for table in sw.TagTableGroup.TagTables:
+            for tag in table.Tags:
+                if not used_symbols or tag.Name.lower() not in used_symbols:
+                    unused.append({
+                        "name":      tag.Name,
+                        "data_type": str(getattr(tag, "DataTypeName", "?")),
+                        "table":     table.Name,
+                        "verified":  bool(used_symbols),  # False = CrossRef nicht verfügbar
+                    })
+
+        _log("hmi").info(
+            f"find_unused_hmi_tags {device_name}: {len(unused)} Tags")
+        return {
+            "status":   "ok",
+            "device":   device_name,
+            "hmi_type": ht,
+            "unused":   unused,
+            "count":    len(unused),
+            "verified": bool(used_symbols),
+            "hint":     "verified=false bedeutet CrossReferenceData nicht verfügbar "
+                        "— manuelle Prüfung empfohlen vor dem Löschen.",
+        }
+    return sta.run(_tia_call, _run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAGS LÖSCHEN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def delete_plc_tag(device_name, table_name, tag_name):
+    """
+    Einzelnen PLC-Tag löschen.
+    Vorher find_unused_plc_tags aufrufen und Liste prüfen!
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        # Tabelle und Tag suchen
+        stack = [(plc.TagTableGroup, "")]
+        while stack:
+            group, _ = stack.pop()
+            for table in group.TagTables:
+                if table.Name == table_name:
+                    for tag in table.Tags:
+                        if tag.Name == tag_name:
+                            tag.Delete()
+                            _log("plc").info(
+                                f"PLC-Tag gelöscht: {table_name}.{tag_name}")
+                            return {
+                                "status": "ok",
+                                "device": device_name,
+                                "table":  table_name,
+                                "tag":    tag_name,
+                            }
+                    raise TiaError("TAG_NOT_FOUND",
+                        f"Tag '{tag_name}' in Tabelle '{table_name}' nicht gefunden.",
+                        True)
+            try:
+                for sub in group.Groups:
+                    stack.append((sub, ""))
+            except Exception:
+                pass
+
+        raise TiaError("TABLE_NOT_FOUND",
+            f"Tag-Tabelle '{table_name}' nicht gefunden.", True)
+    return sta.run(_tia_call, _run)
+
+
+def delete_hmi_tag(device_name, table_name, tag_name):
+    """
+    Einzelnen HMI-Tag löschen.
+    Vorher find_unused_hmi_tags aufrufen und Liste prüfen!
+    """
+    def _run():
+        _sess.ensure_project()
+        sw, ht = _get_hmi(device_name)
+
+        for table in sw.TagTableGroup.TagTables:
+            if table.Name == table_name:
+                for tag in table.Tags:
+                    if tag.Name == tag_name:
+                        tag.Delete()
+                        _log("hmi").info(
+                            f"HMI-Tag gelöscht: {device_name}/{table_name}.{tag_name}")
+                        return {
+                            "status":   "ok",
+                            "device":   device_name,
+                            "hmi_type": ht,
+                            "table":    table_name,
+                            "tag":      tag_name,
+                        }
+                raise TiaError("TAG_NOT_FOUND",
+                    f"Tag '{tag_name}' in Tabelle '{table_name}' nicht gefunden.",
+                    True)
+
+        raise TiaError("TABLE_NOT_FOUND",
+            f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True)
+    return sta.run(_tia_call, _run)

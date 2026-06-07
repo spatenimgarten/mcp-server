@@ -187,6 +187,41 @@ set PROJECT_DIR=F:\02_Projekte\AI\MCP-Server
 | `list_master_copies(lib)` | Master Copies inkl. Unterordner |
 | `get_library_type_versions(lib, type)` | Versionen und Status eines Typs |
 
+### Querverweise & Bereinigung
+| Tool | Beschreibung |
+|---|---|
+| `get_cross_references(device, symbol)` | Alle Verwendungsstellen eines Tags oder Bausteins — PLC muss kompiliert sein |
+| `find_unused_plc_tags(device)` | PLC-Tags ohne Querverweise — erst `compile_plc` aufrufen |
+| `find_unused_hmi_tags(device)` | HMI-Tags ohne Screen-Verwendung |
+| `delete_plc_tag(device, table, tag)` | Einzelnen PLC-Tag löschen — nur nach manueller Prüfung der Liste |
+| `delete_hmi_tag(device, table, tag)` | Einzelnen HMI-Tag löschen — nur nach manueller Prüfung |
+
+> ⚠️ Nie autonom löschen — immer erst `find_unused_*` aufrufen, Liste prüfen, dann gezielt löschen.
+
+### Bibliothek — Öffnen & Suchen
+| Tool | Beschreibung |
+|---|---|
+| `find_libraries(folder)` | Ordner nach `.al*` Bibliotheken durchsuchen — zeigt Name, Pfad, TIA-Version |
+| `open_library(path_or_folder, hint?)` | Globale Bibliothek öffnen; bei Ordnerangabe wird die zur laufenden TIA-Version passende Datei automatisch gewählt |
+
+### UDTs & Bibliothekstypen
+| Tool | Beschreibung |
+|---|---|
+| `list_plc_udts(device)` | Alle UDTs mit vollständiger Memberstruktur als JSON |
+| `use_library_type(device, lib, type, group?)` | Typ (UDT/FB/FC) aus Bibliothek in PLC instanziieren |
+
+### PLC Tags anlegen
+| Tool | Beschreibung |
+|---|---|
+| `create_plc_tag_table(device, table)` | Neue Tag-Tabelle anlegen |
+| `create_plc_tag(device, table, name, type, address?, comment?)` | Einzelnen PLC-Tag anlegen |
+
+### HMI Tags anlegen
+| Tool | Beschreibung |
+|---|---|
+| `create_hmi_tag_table(device, table)` | Neue HMI Tag-Tabelle anlegen |
+| `create_hmi_tag(device, table, name, type, plc_tag?, high?, low?, log?, comment?)` | Einzelnen HMI-Tag anlegen mit optionaler PLC-Verknüpfung, Grenzwerten und Archivierung |
+
 ### Allgemein
 | Tool | Beschreibung |
 |---|---|
@@ -194,6 +229,60 @@ set PROJECT_DIR=F:\02_Projekte\AI\MCP-Server
 | `get_standard_template()` | Vorlage für Standardprojektstruktur |
 | `write_import_file(name, content)` | Hochgeladene Datei für Import speichern |
 | `read_export_file(path)` | Exportierte Datei lesen und anzeigen |
+
+---
+
+## Bereinigung ungenutzter Tags
+
+```
+# 1. Kompilieren (Querverweise müssen aktuell sein)
+compile_plc("PLC_1")
+
+# 2. Ungenutzte Tags finden
+find_unused_plc_tags("PLC_1")
+→ {"unused": [
+     {"name": "Motor2_Alt",   "table": "Standard_Tags"},
+     {"name": "Pumpe3_Test",  "table": "Standard_Tags"},
+     {"name": "Debug_Flag",   "table": "Merker"}
+   ]}
+
+# 3. Liste prüfen — dann gezielt löschen
+delete_plc_tag("PLC_1", "Standard_Tags", "Motor2_Alt")
+delete_plc_tag("PLC_1", "Standard_Tags", "Pumpe3_Test")
+
+# 4. Speichern
+save_project()
+```
+
+---
+
+## Bibliotheks-Workflow
+
+```
+# Bibliothek finden und öffnen
+find_libraries("C:\Bibliotheken")
+→ [{"name": "Antriebe", "path": "...Antriebe_V21.al21", "version": "V21", "match": true}]
+
+open_library("C:\Bibliotheken")   ← Ordner angeben, V21 wird auto-gewählt
+→ {"name": "Antriebe", "types": 12, "copies": 5}
+
+# UDT-Struktur lesen
+list_plc_udts("PLC_1")
+→ [{"name": "UDT_Antrieb", "members": [
+     {"name": "Drehzahl", "data_type": "Real", ...},
+     {"name": "Drehzahl_Hi", "data_type": "Real", ...}, ...]}]
+
+# Typ in PLC instanziieren
+use_library_type("PLC_1", "Antriebe", "UDT_Antrieb", "Antriebe")
+
+# Tags anlegen
+create_plc_tag("PLC_1", "Standard_Tags", "Motor1_Start", "Bool", "%M0.0")
+create_hmi_tag("HMI_1", "Antriebe", "Motor1_Drehzahl", "Real",
+               plc_tag="PLC_1.DB1.Drehzahl", high_limit=3000, low_limit=0,
+               logging_enabled=True)
+
+save_project()
+```
 
 ---
 

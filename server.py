@@ -93,6 +93,29 @@ und Standardstrukturen anlegen (PLC, HMI Advanced/Unified, Bibliotheken).
   list_plc_tag_tables(device)          → Tag-Tabellen mit Namen und Tag-Anzahl
   list_plc_tags(device, table?)        → PLC-Tags als JSON: name/data_type/address/comment
 
+## Querverweise & Bereinigung
+  get_cross_references(device, symbol)  → Verwendungsstellen eines Tags/Bausteins
+  find_unused_plc_tags(device)          → PLC-Tags ohne Querverweise (compile_plc vorher!)
+  find_unused_hmi_tags(device)          → HMI-Tags ohne Screen-Verwendung
+  delete_plc_tag(device, table, tag)    → Tag löschen — nur nach manueller Prüfung!
+  delete_hmi_tag(device, table, tag)    → HMI-Tag löschen — nur nach manueller Prüfung!
+
+## Bibliothek — Öffnen
+  find_libraries(folder)               → .al* Dateien in Ordner auflisten mit TIA-Version
+  open_library(path_or_folder, hint?)  → globale Bibliothek öffnen; Ordner = auto-detect Version
+
+## UDTs & Bibliothekstypen
+  list_plc_udts(device)                → alle UDTs mit Memberstruktur als JSON
+  use_library_type(device, lib, type, group?) → Typ aus Bibliothek in PLC instanziieren
+
+## PLC Tags anlegen
+  create_plc_tag_table(device, table)  → neue Tag-Tabelle anlegen
+  create_plc_tag(device, table, name, type, address?, comment?) → Tag anlegen
+
+## HMI Tags anlegen
+  create_hmi_tag_table(device, table)  → neue HMI Tag-Tabelle anlegen
+  create_hmi_tag(device, table, name, type, plc_tag?, high?, low?, log?, comment?)
+
 ## PLC schreiben
   save_project()                       → Projekt speichern — nach jeder Aenderung aufrufen!
   compile_plc(device)                  → Kompilieren vor Export / bei inkonsistenten Bloecken
@@ -485,6 +508,132 @@ async def list_tools():
         T("save_project",
           "Aktuelles Projekt speichern (project.Save()). "
           "Nach allen schreibenden Operationen aufrufen."),
+
+        # BIBLIOTHEK — Öffnen / Suchen
+        T("find_libraries",
+          "Ordner nach globalen TIA-Bibliotheken (.al*) durchsuchen. "
+          "Gibt Name, Pfad und TIA-Version zurück. "
+          "Aufrufen wenn Bibliothekspfad unbekannt oder Version unklar.",
+          {"folder": {"type": "string",
+                      "description": "Ordner z.B. C:\\Bibliotheken"}},
+          ["folder"]),
+
+        T("open_library",
+          "Globale TIA-Bibliothek öffnen. "
+          "path_or_folder: vollständiger Dateipfad (.al21) ODER Ordnerpfad — "
+          "dann wird automatisch die zur laufenden TIA-Version passende Datei gewählt. "
+          "name_hint: optionaler Teilname bei mehreren Bibliotheken im Ordner.",
+          {"path_or_folder": {"type": "string"},
+           "name_hint":      {"type": "string",
+                              "description": "Optional: Teilname z.B. 'Antriebe'"}},
+          ["path_or_folder"]),
+
+        # UDTs lesen
+        T("list_plc_udts",
+          "Alle UDTs der PLC als JSON mit vollständiger Memberstruktur. "
+          "Felder je Member: name, data_type, default_value, comment, offset. "
+          "Wichtig für HMI-Tag-Automation und Validierung.",
+          {"device_name": {"type": "string"}},
+          ["device_name"]),
+
+        # Bibliothekstyp instanziieren
+        T("use_library_type",
+          "Bibliothekstyp (UDT, FB, FC) aus Projekt- oder globaler Bibliothek "
+          "in PLC instanziieren. Verwendet die Standardversion. "
+          "group_path optional: Zielordner im PLC z.B. 'Antriebe'.",
+          {"device_name":   {"type": "string"},
+           "library_name":  {"type": "string"},
+           "type_name":     {"type": "string"},
+           "group_path":    {"type": "string",
+                             "description": "Optional: Zielordner z.B. 'Antriebe'"}},
+          ["device_name", "library_name", "type_name"]),
+
+        # PLC Tags anlegen
+        T("create_plc_tag_table",
+          "Neue PLC Tag-Tabelle anlegen.",
+          {"device_name": {"type": "string"},
+           "table_name":  {"type": "string"}},
+          ["device_name", "table_name"]),
+
+        T("create_plc_tag",
+          "Einzelnen PLC-Tag anlegen. "
+          "Tabelle muss existieren (vorher list_plc_tag_tables prüfen). "
+          "data_type z.B. 'Bool', 'Int', 'Real', 'DWord'. "
+          "address optional z.B. '%M0.0'. comment optional.",
+          {"device_name": {"type": "string"},
+           "table_name":  {"type": "string"},
+           "tag_name":    {"type": "string"},
+           "data_type":   {"type": "string"},
+           "address":     {"type": "string",
+                           "description": "Optional: z.B. '%M0.0'"},
+           "comment":     {"type": "string"}},
+          ["device_name", "table_name", "tag_name", "data_type"]),
+
+        # HMI Tags anlegen
+        T("create_hmi_tag_table",
+          "Neue HMI Tag-Tabelle anlegen.",
+          {"device_name": {"type": "string"},
+           "table_name":  {"type": "string"}},
+          ["device_name", "table_name"]),
+
+        T("create_hmi_tag",
+          "Einzelnen HMI-Tag anlegen. "
+          "data_type z.B. 'Int', 'Real', 'Bool'. "
+          "plc_tag: Verknüpfung mit PLC-Tag z.B. 'PLC_1.DB1.Motor1_Drehzahl'. "
+          "high_limit / low_limit für analoge Tags. "
+          "logging_enabled: Archivierung.",
+          {"device_name":      {"type": "string"},
+           "table_name":       {"type": "string"},
+           "tag_name":         {"type": "string"},
+           "data_type":        {"type": "string"},
+           "plc_tag":          {"type": "string",
+                                "description": "Optional: PLC-Tag Verknüpfung"},
+           "high_limit":       {"type": "number"},
+           "low_limit":        {"type": "number"},
+           "logging_enabled":  {"type": "boolean"},
+           "comment":          {"type": "string"}},
+          ["device_name", "table_name", "tag_name", "data_type"]),
+
+        # QUERVERWEISE & UNGENUTZTE TAGS
+        T("get_cross_references",
+          "Alle Verwendungsstellen eines Symbols (Tag, Baustein, DB-Variable). "
+          "PLC muss kompiliert sein. "
+          "Rückgabe: block, block_type, language, usage (Read/Write/Call), location.",
+          {"device_name": {"type": "string"},
+           "symbol":      {"type": "string",
+                           "description": "z.B. 'Motor1_Start', 'FB_Antrieb', 'DB1'"}},
+          ["device_name", "symbol"]),
+
+        T("find_unused_plc_tags",
+          "Alle PLC-Tags die in keinem Baustein verwendet werden. "
+          "PLC muss kompiliert sein (compile_plc aufrufen). "
+          "Ergebnis prüfen bevor delete_plc_tag aufgerufen wird!",
+          {"device_name": {"type": "string"}},
+          ["device_name"]),
+
+        T("find_unused_hmi_tags",
+          "Alle HMI-Tags die in keinem Screen verwendet werden. "
+          "verified=false im Ergebnis bedeutet manuelle Prüfung nötig.",
+          {"device_name": {"type": "string"}},
+          ["device_name"]),
+
+        T("delete_plc_tag",
+          "Einzelnen PLC-Tag löschen. "
+          "IMMER zuerst find_unused_plc_tags aufrufen und Liste manuell prüfen! "
+          "Danach save_project aufrufen.",
+          {"device_name": {"type": "string"},
+           "table_name":  {"type": "string"},
+           "tag_name":    {"type": "string"}},
+          ["device_name", "table_name", "tag_name"]),
+
+        T("delete_hmi_tag",
+          "Einzelnen HMI-Tag löschen. "
+          "IMMER zuerst find_unused_hmi_tags aufrufen und Liste manuell prüfen! "
+          "Danach save_project aufrufen.",
+          {"device_name": {"type": "string"},
+           "table_name":  {"type": "string"},
+           "tag_name":    {"type": "string"}},
+          ["device_name", "table_name", "tag_name"]),
     ]
 
 # ── Dispatch ───────────────────────────────────────────────────────────────────
@@ -543,7 +692,20 @@ def _dispatch(name, a):
         case "list_plc_blocks":            return tia.list_plc_blocks(a["device_name"],a.get("group_path"))
         case "list_plc_tag_tables":        return tia.list_plc_tag_tables(a["device_name"])
         case "list_plc_tags":              return tia.list_plc_tags(a["device_name"],a.get("table_name"))
-        case "save_project":               return tia.save_project()
+        case "find_libraries":       return tia.find_libraries(a["folder"])
+        case "open_library":          return tia.open_library(a["path_or_folder"], a.get("name_hint"))
+        case "list_plc_udts":         return tia.list_plc_udts(a["device_name"])
+        case "use_library_type":      return tia.use_library_type(a["device_name"],a["library_name"],a["type_name"],a.get("group_path"))
+        case "create_plc_tag_table":  return tia.create_plc_tag_table(a["device_name"],a["table_name"])
+        case "create_plc_tag":        return tia.create_plc_tag(a["device_name"],a["table_name"],a["tag_name"],a["data_type"],a.get("address"),a.get("comment"))
+        case "create_hmi_tag_table":  return tia.create_hmi_tag_table(a["device_name"],a["table_name"])
+        case "create_hmi_tag":        return tia.create_hmi_tag(a["device_name"],a["table_name"],a["tag_name"],a["data_type"],a.get("plc_tag"),a.get("high_limit"),a.get("low_limit"),a.get("logging_enabled",False),a.get("comment"))
+        case "save_project":          return tia.save_project()
+        case "get_cross_references":   return tia.get_cross_references(a["device_name"],a["symbol"])
+        case "find_unused_plc_tags":   return tia.find_unused_plc_tags(a["device_name"])
+        case "find_unused_hmi_tags":   return tia.find_unused_hmi_tags(a["device_name"])
+        case "delete_plc_tag":         return tia.delete_plc_tag(a["device_name"],a["table_name"],a["tag_name"])
+        case "delete_hmi_tag":         return tia.delete_hmi_tag(a["device_name"],a["table_name"],a["tag_name"])
         case _: raise TiaError("UNKNOWN_TOOL",f"Unbekanntes Tool: {name}",False)
 
 # ── Entry Point ────────────────────────────────────────────────────────────────

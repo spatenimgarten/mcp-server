@@ -19,6 +19,7 @@ Bausteine lesen und bearbeiten, Tags verwalten, HMI konfigurieren, Projekte vali
 | `bridge.py` | Ollama ↔ MCP Bridge · lokales LLM statt Claude Desktop |
 | `web_server.py` | MCP HTTP Streamable Server · für Copilot Studio via Dev Tunnel |
 | `start_copilot.bat` | Starter: TIA Portal + web_server.py + Dev Tunnel |
+| `start_webui.bat` | Starter: TIA Portal + web_server.py + OpenWebUI |
 
 ---
 
@@ -216,7 +217,60 @@ save_project()                               → speichern
 
 ---
 
-## Modus 3 — Lokales LLM (Ollama + bridge.py)
+## Modus 3 — OpenWebUI + Ollama (empfohlen statt bridge.py)
+
+OpenWebUI ist eine Browser-Oberfläche für Ollama mit nativem MCP-Support —
+die komfortablere Alternative zu `bridge.py`, und gleichzeitig ein idealer
+Testclient für `web_server.py` bevor Copilot Studio verfügbar ist.
+
+> `bridge.py` wird damit weitgehend obsolet, bleibt aber im Repo als
+> Fallback für reine Konsolennutzung.
+
+### Einmalige Einrichtung
+
+```powershell
+# Ollama installieren: https://ollama.com/download → Windows
+# Modell herunterladen:
+ollama pull qwen2.5-coder:14b
+
+# OpenWebUI ins .venv installieren:
+.venv\Scripts\activate
+pip install open-webui
+```
+
+### Täglicher Betrieb
+
+```powershell
+start_webui.bat
+```
+
+Die Batch-Datei startet:
+1. TIA Portal (minimiert, 35 Sekunden Wartezeit)
+2. `web_server.py` in eigenem Fenster (Port 8000)
+3. OpenWebUI in eigenem Fenster (Port 3000)
+
+Browser öffnen: **http://localhost:3000**
+
+### MCP-Server einrichten (einmalig im Browser)
+
+```
+Admin Settings → External Tools → Add Server
+  Type:  MCP (Streamable HTTP)       ← nicht OpenAPI!
+  URL:   http://localhost:8000/mcp
+  Auth:  None
+→ Save
+```
+
+Ab dann steht das TIA-Toolset in jedem Chat zur Verfügung —
+Modell im Dropdown wählen, loslegen.
+
+> OpenWebUI v0.6.31 oder neuer erforderlich (MCP-Support ab dieser Version).
+
+---
+
+## Modus 4 — Lokales LLM Konsole (bridge.py)
+
+Fallback für reine Konsolennutzung ohne Browser-Oberfläche.
 
 ```powershell
 pip install ollama

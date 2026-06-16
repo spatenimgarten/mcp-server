@@ -6,7 +6,7 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.9.1"
+VERSION      = "1.9.2"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
@@ -1323,33 +1323,29 @@ def list_hmi_cycles(device_name):
         elif hasattr(sw, "Cycles"):
             src = sw.Cycles
         if src is not None:
+            import re as _re
             for c in src:
                 name = str(c.Name)
-                # Periode aus Attributen lesen; falls leer, aus dem Namen parsen
-                period = getattr(c, "Period", None) or getattr(c, "CyclePeriod", None)
-                unit   = getattr(c, "PeriodUnit", None) or getattr(c, "Unit", None)
-                if period is None:
-                    # Name-Parsing: "100 ms" → period=100, unit="ms"
-                    import re as _re
-                    m = _re.match(r"^([\d.]+)\s*(\w+)$", name.strip())
-                    if m:
-                        period = m.group(1)
-                        unit   = m.group(2)
-                # Alle tatsächlich vorhandenen Attribute sammeln
-                attrs = {}
+                entry = {"name": name}
+                # Alle Attribute via GetAttributeInfos lesen
                 if hasattr(c, "GetAttributeInfos"):
                     for ai in c.GetAttributeInfos():
                         n = str(ai.Name)
                         v = c.GetAttribute(n)
+                        entry[n] = str(v) if v is not None else None
+                else:
+                    # Fallback: bekannte Attributnamen probieren
+                    for attr in ["Period", "CyclePeriod", "PeriodUnit", "Unit", "Comment"]:
+                        v = getattr(c, attr, None)
                         if v is not None:
-                            attrs[n] = str(v)
-                cycles.append({
-                    "name":    name,
-                    "period":  str(period) if period is not None else None,
-                    "unit":    str(unit)   if unit   is not None else None,
-                    "comment": str(getattr(c, "Comment", "") or ""),
-                    **({"attributes": attrs} if attrs else {}),
-                })
+                            entry[attr] = str(v)
+                # Falls keine Zeitangabe aus Attributen: Namen parsen
+                if not any(k in entry for k in ["Period", "CyclePeriod"]):
+                    m = _re.match(r"^([\d.]+)\s*(\w+)$", name.strip())
+                    if m:
+                        entry["_period_parsed"] = m.group(1)
+                        entry["_unit_parsed"]   = m.group(2)
+                cycles.append(entry)
         note = None if src is not None else "CycleFolder/Cycles nicht verfügbar (V21-Limitation oder Unified)"
         return {"device": device_name, "hmi_type": ht, "cycles": cycles,
                 "count": len(cycles), **({"note": note} if note else {})}

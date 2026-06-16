@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.13.0"
+VERSION      = "1.13.1"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.13.1: _get_hmi — akzeptiert jetzt device.Name UND item.Name (z.B. HMI_Advanced = HMI_RT_1)",
         "1.13.0: export/import_hmi_alarms — JSON-basiert via GetAttributeInfos (kein V21-API-Export)",
         "1.12.0: set_hmi_log — Unified DataLog-Einstellungen schreiben (Name, Segment, Settings)",
         "1.11.0: list_hmi_logs — Unified DataLogs mit Segment, Settings, Backup-Attributen",
@@ -1140,16 +1141,21 @@ def export_hmi_runtime_settings(device_name, output_path=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_hmi(device_name):
+    """
+    Sucht HMI-Software nach device.Name ODER item.Name — beide Schreibweisen
+    werden akzeptiert (z.B. 'HMI_Advanced' und 'HMI_RT_1' sind gleichwertig).
+    """
     import Siemens.Engineering as eng
     sw_type = _get_sw_container_type()
-    all_names = []
+    all_device_names = []
     for device in _iter_all_devices(_sess.project):
-        all_names.append(device.Name)
-        if device.Name != device_name:
-            continue
+        all_device_names.append(device.Name)
         for item in device.DeviceItems:
             sw = _try_get_software(item, "", sw_type, eng)
             if sw:
+                # Match auf device.Name ODER item.Name
+                if device.Name != device_name and item.Name != device_name:
+                    continue
                 # BUG-13 Fix: FullName prüfen, nicht nur __name__
                 # IronPython gibt type.__name__ = "HmiSoftware" für BEIDE Typen zurück
                 # aber type.__module__ unterscheidet: "HmiUnified" vs "Hmi"
@@ -1157,7 +1163,7 @@ def _get_hmi(device_name):
                 if "HmiUnified" in full: return sw, "Unified"
                 if "Hmi"        in full: return sw, "Advanced"
     raise TiaError("HMI_NOT_FOUND", f"HMI '{device_name}' nicht gefunden.", True,
-                   {"available": all_names})
+                   {"available": all_device_names})
 
 def _hmi_tag_tables(sw):
     """

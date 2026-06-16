@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.6.0"
+VERSION      = "1.7.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -506,6 +506,25 @@ async def list_tools():
           {"device_name":  {"type": "string"},
            "output_path":  {"type": "string", "description": "Optional: anderer Exportpfad (.xlsx)"}},
           ["device_name"]),
+        T("get_plc_config",
+          "Alle Konfigurationsattribute einer SPS (CPU) auslesen. "
+          "Liefert Zykluszeiten, Startup-Verhalten, Zeitzone, Netzwerk, SNMP, OPC UA, Webserver u.v.m.",
+          {"device_name": {"type": "string", "description": "Name des CPU-DeviceItems z.B. 'PLC_1'"}},
+          ["device_name"]),
+        T("set_plc_config",
+          "Konfigurationsattribute einer SPS schreiben. "
+          "Vorher get_plc_config aufrufen um verfügbare Schlüssel zu sehen. "
+          "Schreibgeschützte Attribute (z.B. OrderNumber, FirmwareVersion) werden automatisch übersprungen.",
+          {"device_name": {"type": "string"},
+           "settings":    {"type": "object", "description": "Key-Value-Paare z.B. {\"WebserverActivate\": true}"}},
+          ["device_name", "settings"]),
+        T("export_plc_config",
+          "SPS-Konfiguration als Excel-Datei exportieren, gruppiert nach Kategorien "
+          "(Allgemein, Zyklus, Startup, Zeitzone, Netzwerk, OPC UA, Sicherheit usw.). "
+          f"Standard: {_DEFAULT_EXPORT}\\plc_config_<device>.xlsx",
+          {"device_name":  {"type": "string"},
+           "output_path":  {"type": "string", "description": "Optional: anderer Exportpfad (.xlsx)"}},
+          ["device_name"]),
         T("export_hw_config",
           "Hardware-Konfiguration aller Geraete als Excel exportieren. "
           "Liefert Station, Komponente, Bestellnummer, Steckplatz, IP-Adresse. "
@@ -758,6 +777,9 @@ def _dispatch(name, a):
         case "get_hmi_runtime_settings":        return tia.get_hmi_runtime_settings(a["device_name"])
         case "set_hmi_runtime_settings":        return tia.set_hmi_runtime_settings(a["device_name"], a["settings"])
         case "export_hmi_runtime_settings":     return tia.export_hmi_runtime_settings(a["device_name"], a.get("output_path"))
+        case "get_plc_config":                  return tia.get_plc_config(a["device_name"])
+        case "set_plc_config":                  return tia.set_plc_config(a["device_name"], a["settings"])
+        case "export_plc_config":               return tia.export_plc_config(a["device_name"], a.get("output_path"))
         case "list_hmi_screens":           return tia.list_hmi_screens(a["device_name"])
         case "list_hmi_tags":              return tia.list_hmi_tags(a["device_name"],a.get("table_name"))
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])

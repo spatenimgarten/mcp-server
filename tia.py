@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.6.0"
+VERSION      = "1.7.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.7.0: get/set/export_plc_config — SPS-DeviceItem-Attribute lesen, schreiben, als Excel exportieren",
         "1.6.0: get/set/export_hmi_runtime_settings — Unified Runtime-Einstellungen lesen, schreiben, exportieren",
         "1.5.0: export_hw_config — Hardware-Konfiguration als Excel exportieren",
         "1.4.0: BUG-15 Fix: list_plc_tags comment-Feld via _mltext() korrekt auslesen",
@@ -465,6 +466,194 @@ def list_devices():
             result.append({"name": device.Name, "software": sw_list})
         return {"devices": result, "count": len(result)}
     return sta.run(_tia_call, _run)
+
+def _find_plc_item(device_name):
+    """CPU DeviceItem anhand des Software-ItemNamens finden."""
+    import Siemens.Engineering as eng
+    sw_type = _get_sw_container_type()
+    for device in _iter_all_devices(_sess.project):
+        item_stack = list(device.DeviceItems)
+        while item_stack:
+            item = item_stack.pop()
+            sw = _try_get_software(item, "", sw_type, eng)
+            if sw and "Plc" in type(sw).__name__ and item.Name == device_name:
+                return item
+            for sub in item.DeviceItems:
+                item_stack.append(sub)
+    raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+
+# Attribute die nicht sinnvoll schreibbar sind (interne/berechnete Werte)
+_PLC_READONLY_ATTRS = {
+    "Classification", "Container", "FirmwareVersion", "InstallationDate",
+    "IsBuiltIn", "IsPlugged", "Items", "Name", "OrderNumber",
+    "PositionNumber", "ShortDesignation", "TypeIdentifier",
+    "TypeIdentifierNormalized", "TypeName", "MultilingualSupportAdvanced",
+    "CommentML",
+}
+
+# Gruppierung für Excel-Export
+_PLC_ATTR_GROUPS = {
+    "Allgemein":     ["Name", "OrderNumber", "ShortDesignation", "FirmwareVersion",
+                      "TypeName", "Author", "Comment", "LocationIdentifier",
+                      "PlantDesignation", "AdditionalInformation", "InstallationDate"],
+    "Zyklus":        ["CycleMinimumCycleTime", "CycleMaximumCycleTime",
+                      "CycleCommunicationLoad", "CycleEnableMinimumCycleTime",
+                      "IsochronousMode", "SendClock"],
+    "Startup":       ["StartupActionAfterPowerOn", "StartupComparisonPresetToActualModule",
+                      "StartupConfigurationTimeout"],
+    "Zeitzone":      ["TimeOfDayLocalTimeZone", "TimeOfDayActivateDaylightSavingTime",
+                      "TimeOfDayDaylightSavingTimeOffset", "TimeOfDayDaylightSavingTimeStartMonth",
+                      "TimeOfDayDaylightSavingTimeStartWeek", "TimeOfDayDaylightSavingTimeStartWeekday",
+                      "TimeOfDayDaylightSavingTimeStartHour", "TimeOfDayStandardTimeStartMonth",
+                      "TimeOfDayStandardTimeStartWeek", "TimeOfDayStandardTimeStartWeekday",
+                      "TimeOfDayStandardTimeStartHour", "TimeSynchronizationNtpV2"],
+    "Sicherheit":    ["PlcAccessControlConfiguration", "ConfigurationControl",
+                      "NetworkFaultsAsMaintenance", "SuppressDeactivatingSystemDiagnosticsAlarms",
+                      "UseFixedSystemDiagnosticsAlarmIds", "ProtectionIntervalForSummarizeOfSecurityEvents",
+                      "ProtectionSummarizeSecurityEventsOnHighLoad",
+                      "ProtectionUnitForSummarizeOfSecurityEvents"],
+    "Netzwerk":      ["HostAndDomainnameActive", "IPv4ForwardingActive", "CommunicationMode",
+                      "PnDnsConfiguration", "PnDnsConfigNameResolve",
+                      "SNMPActive", "SNMPReadOnlyActive", "SNMPReadOnlyCommunityName",
+                      "SNMPReadWriteCommunityName", "SNMPSynchronizeActive", "SNMPConfigurationSource"],
+    "OPC UA":        ["OpcUaPurchasedLicense"],
+    "Web & Syslog":  ["WebserverActivate", "SysLogAutoAcceptClient",
+                      "SysLogClientCertificateId", "SysLogTrustedCertificateIds"],
+    "Speicher":      ["ClockMemoryByte", "SystemMemoryByte", "SystemPowerSupplyExternal"],
+    "Diagnose":      ["CentralAlarmManagement", "DetectLoadVoltageFailure",
+                      "ProDiagUsedLicenses"],
+}
+
+
+def get_plc_config(device_name):
+    def _run():
+        _sess.ensure_project()
+        item = _find_plc_item(device_name)
+        config = {}
+        for ai in item.GetAttributeInfos():
+            n = str(ai.Name)
+            v = item.GetAttribute(n)
+            config[n] = str(v) if v is not None else None
+        return {"status": "ok", "device": device_name, "config": config}
+    return sta.run(_tia_call, _run)
+
+
+def set_plc_config(device_name, settings: dict):
+    def _run():
+        _sess.ensure_project()
+        item = _find_plc_item(device_name)
+        applied, skipped = [], []
+        for key, val in settings.items():
+            if key in _PLC_READONLY_ATTRS:
+                skipped.append(key)
+                continue
+            item.SetAttribute(key, val)
+            applied.append(key)
+        return {"status": "ok", "device": device_name, "applied": applied, "skipped_readonly": skipped}
+    return sta.run(_tia_call, _run)
+
+
+def export_plc_config(device_name, output_path=None):
+    def _run():
+        _sess.ensure_project()
+        item = _find_plc_item(device_name)
+        config = {}
+        for ai in item.GetAttributeInfos():
+            n = str(ai.Name)
+            v = item.GetAttribute(n)
+            config[n] = str(v) if v is not None else None
+        return config
+
+    config = sta.run(_tia_call, _run)
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise TiaError("MISSING_DEPENDENCY", "openpyxl nicht installiert.", False)
+
+    out = Path(output_path) if output_path else Path(_DEFAULT_EXPORT) / f"plc_config_{device_name}.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PLC Konfiguration"
+    thin   = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for col, (h, w) in enumerate(zip(["Einstellung", "Wert", "Gruppe"], [40, 40, 22]), 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        c.fill      = PatternFill("solid", start_color="1F4E79")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border    = border
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 22
+
+    grp_fill = PatternFill("solid", start_color="D6E4F0")
+    val_fill = PatternFill("solid", start_color="F5FBFF")
+    alt_fill = PatternFill("solid", start_color="EAF4FB")
+    ro_font  = Font(name="Arial", size=10, color="808080")
+
+    r = 2
+    written = set()
+    for group, keys in _PLC_ATTR_GROUPS.items():
+        c = ws.cell(row=r, column=1, value=group)
+        c.font = Font(name="Arial", bold=True, size=10)
+        c.fill = grp_fill
+        c.border = border
+        for col in [2, 3]:
+            ws.cell(row=r, column=col).fill   = grp_fill
+            ws.cell(row=r, column=col).border = border
+        r += 1
+        for key in keys:
+            if key not in config:
+                continue
+            fill = val_fill if r % 2 == 0 else alt_fill
+            ro   = key in _PLC_READONLY_ATTRS
+            ws.cell(row=r, column=1, value=f"  {key}").fill   = fill
+            ws.cell(row=r, column=1).font   = ro_font if ro else Font(name="Arial", size=10)
+            ws.cell(row=r, column=1).border = border
+            ws.cell(row=r, column=2, value=config[key] or "").fill   = fill
+            ws.cell(row=r, column=2).font   = Font(name="Arial", size=10)
+            ws.cell(row=r, column=2).border = border
+            ws.cell(row=r, column=3, value=group).fill   = fill
+            ws.cell(row=r, column=3).font   = Font(name="Arial", size=10, color="808080")
+            ws.cell(row=r, column=3).border = border
+            written.add(key)
+            r += 1
+
+    # Restliche Attribute (nicht in Gruppen) am Ende
+    remaining = {k: v for k, v in config.items() if k not in written}
+    if remaining:
+        c = ws.cell(row=r, column=1, value="Sonstige")
+        c.font = Font(name="Arial", bold=True, size=10)
+        c.fill = grp_fill
+        c.border = border
+        for col in [2, 3]:
+            ws.cell(row=r, column=col).fill   = grp_fill
+            ws.cell(row=r, column=col).border = border
+        r += 1
+        for key, val in sorted(remaining.items()):
+            fill = val_fill if r % 2 == 0 else alt_fill
+            ro   = key in _PLC_READONLY_ATTRS
+            ws.cell(row=r, column=1, value=f"  {key}").fill   = fill
+            ws.cell(row=r, column=1).font   = ro_font if ro else Font(name="Arial", size=10)
+            ws.cell(row=r, column=1).border = border
+            ws.cell(row=r, column=2, value=val or "").fill   = fill
+            ws.cell(row=r, column=2).font   = Font(name="Arial", size=10)
+            ws.cell(row=r, column=2).border = border
+            ws.cell(row=r, column=3, value="Sonstige").fill   = fill
+            ws.cell(row=r, column=3).font   = Font(name="Arial", size=10, color="808080")
+            ws.cell(row=r, column=3).border = border
+            r += 1
+
+    ws.freeze_panes = "A2"
+    wb.save(str(out))
+    return {"status": "ok", "file": str(out), "device": device_name, "attributes": len(config)}
+
 
 def export_hw_config(output_path=None):
     def _run():

@@ -1416,6 +1416,111 @@ def import_hmi_cycles(device_name, file_path):
         return {"status": "ok", "device": device_name, "imported_from": file_path}
     return sta.run(_tia_call, _run)
 
+def list_hmi_graphic_lists(device_name):
+    """Grafiklisten eines HMI auflisten (Advanced: GraphicLists, Unified: HmiGraphicLists)."""
+    def _run():
+        _sess.ensure_project()
+        _, ht = _get_hmi(device_name)
+        gls = []
+        seen = set()
+        for _item_name, sw, sw_ht in _get_hmi_all_sw(device_name):
+            coll_name = "HmiGraphicLists" if sw_ht == "Unified" else "GraphicLists"
+            if not hasattr(sw, coll_name):
+                continue
+            coll = getattr(sw, coll_name)
+            for i in range(coll.Count):
+                gl = coll[i]
+                if gl.Name in seen:
+                    continue
+                seen.add(gl.Name)
+                gls.append({"name": gl.Name})
+        return {"device": device_name, "hmi_type": ht, "graphic_lists": gls, "count": len(gls)}
+    return sta.run(_tia_call, _run)
+
+def export_hmi_graphic_lists(device_name, output_path=None):
+    """
+    Grafiklisten exportieren.
+    Advanced: je eine XML-Datei pro Liste (gl.Export).
+    Unified: Collection-Export in Ordner (HmiGraphicLists.Export(DirectoryInfo, name)).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        _, ht = _get_hmi(device_name)
+        out_dir = Path(output_path) if output_path else _export_dir(None)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        exported = []
+        errors = []
+        seen = set()
+        for _item_name, sw, sw_ht in _get_hmi_all_sw(device_name):
+            if sw_ht == "Unified":
+                coll = getattr(sw, "HmiGraphicLists", None)
+                if coll is None or coll.Count == 0:
+                    continue
+                try:
+                    files = coll.Export(DirectoryInfo(str(out_dir)), "")
+                    for f in files:
+                        exported.append({"file": str(f.FullName)})
+                except Exception as ex:
+                    errors.append({"type": "Unified", "error": str(ex)})
+            else:
+                coll = getattr(sw, "GraphicLists", None)
+                if coll is None:
+                    continue
+                for i in range(coll.Count):
+                    gl = coll[i]
+                    if gl.Name in seen:
+                        continue
+                    seen.add(gl.Name)
+                    xml_file = out_dir / f"hmi_gl_{device_name}_{gl.Name}.xml"
+                    if xml_file.exists():
+                        xml_file.unlink()
+                    try:
+                        gl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                        exported.append({"name": gl.Name, "file": str(xml_file)})
+                    except Exception as ex:
+                        errors.append({"name": gl.Name, "error": str(ex)})
+        if not exported and errors:
+            raise TiaError("GL_EXPORT_FAILED", f"Kein Export möglich: {errors}", False)
+        if not exported and not errors:
+            raise TiaError("GL_EMPTY", f"Keine Grafiklisten in '{device_name}' gefunden.", False)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "exported": exported, "errors": errors, "count": len(exported)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_graphic_lists(device_name, file_path):
+    """
+    Grafiklisten importieren.
+    Advanced: XML-Datei → GraphicLists.Import(FileInfo, Override).
+    Unified: Ordner → HmiGraphicLists.Import(DirectoryInfo, name).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        _, ht = _get_hmi(device_name)
+        for _item_name, sw, sw_ht in _get_hmi_all_sw(device_name):
+            if sw_ht == "Unified":
+                coll = getattr(sw, "HmiGraphicLists", None)
+                if coll is None:
+                    continue
+                p = Path(file_path)
+                coll.Import(DirectoryInfo(str(p) if p.is_dir() else str(p.parent)), p.stem if not p.is_dir() else "")
+                return {"status": "ok", "device": device_name, "imported_from": file_path}
+            else:
+                coll = getattr(sw, "GraphicLists", None)
+                if coll is None:
+                    continue
+                fi = FileInfo(file_path)
+                if not fi.Exists:
+                    raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
+                coll.Import(fi, eng.ImportOptions.Override)
+                return {"status": "ok", "device": device_name, "imported_from": file_path}
+        raise TiaError("GL_IMPORT_NOT_SUPPORTED",
+            f"Kein Grafiklisten-Import für '{device_name}' ({ht}).", False)
+    return sta.run(_tia_call, _run)
+
 def list_hmi_scheduled_tasks(device_name):
     def _run():
         _sess.ensure_project(); sw, ht = _get_hmi(device_name)

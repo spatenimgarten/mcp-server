@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.9.0"
+VERSION      = "1.9.1"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.9.1: list_hmi_cycles — Periode/Einheit aus Name geparst wenn kein Attribut; GetAttributeInfos für alle Cycle-Attribute",
         "1.9.0: list_hmi_cycles + list_hmi_scheduled_tasks — Erfassungszyklen und geplante Tasks (Advanced/Unified)",
         "1.8.0: get/set/export_hmi_config — HMI-DeviceItem-Attribute für Advanced UND Unified, Unified mit RuntimeSettings-Sheet",
         "1.7.0: get/set/export_plc_config — SPS-DeviceItem-Attribute lesen, schreiben, als Excel exportieren",
@@ -1323,11 +1324,31 @@ def list_hmi_cycles(device_name):
             src = sw.Cycles
         if src is not None:
             for c in src:
+                name = str(c.Name)
+                # Periode aus Attributen lesen; falls leer, aus dem Namen parsen
+                period = getattr(c, "Period", None) or getattr(c, "CyclePeriod", None)
+                unit   = getattr(c, "PeriodUnit", None) or getattr(c, "Unit", None)
+                if period is None:
+                    # Name-Parsing: "100 ms" → period=100, unit="ms"
+                    import re as _re
+                    m = _re.match(r"^([\d.]+)\s*(\w+)$", name.strip())
+                    if m:
+                        period = m.group(1)
+                        unit   = m.group(2)
+                # Alle tatsächlich vorhandenen Attribute sammeln
+                attrs = {}
+                if hasattr(c, "GetAttributeInfos"):
+                    for ai in c.GetAttributeInfos():
+                        n = str(ai.Name)
+                        v = c.GetAttribute(n)
+                        if v is not None:
+                            attrs[n] = str(v)
                 cycles.append({
-                    "name":   str(c.Name),
-                    "period": str(getattr(c, "Period", None)),
-                    "unit":   str(getattr(c, "PeriodUnit", getattr(c, "Unit", "?"))),
+                    "name":    name,
+                    "period":  str(period) if period is not None else None,
+                    "unit":    str(unit)   if unit   is not None else None,
                     "comment": str(getattr(c, "Comment", "") or ""),
+                    **({"attributes": attrs} if attrs else {}),
                 })
         note = None if src is not None else "CycleFolder/Cycles nicht verfügbar (V21-Limitation oder Unified)"
         return {"device": device_name, "hmi_type": ht, "cycles": cycles,

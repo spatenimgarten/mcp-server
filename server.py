@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.7.0"
+VERSION      = "1.8.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -488,6 +488,27 @@ async def list_tools():
         T("get_version", "Versionen von server.py und tia.py mit Changelog."),
         T("get_project_info",   "Projektinfo und Geraete."),
         T("list_devices",       "Alle Geraete mit HMI-Typ."),
+        T("get_hmi_config",
+          "HMI-Gerätekonfiguration auslesen — funktioniert für Advanced UND Unified. "
+          "Liest alle DeviceItem-Attribute (IP, Display, Runtime, Kommunikation …). "
+          "Bei Unified zusätzlich RuntimeSettings als separates Feld.",
+          {"device_name": {"type": "string"}}, ["device_name"]),
+        T("set_hmi_config",
+          "HMI-Gerätekonfiguration schreiben — Advanced und Unified. "
+          "Schreibt DeviceItem-Attribute; bei Unified auch RuntimeSettings-Keys. "
+          "Schreibgeschützte Attribute (Name, OrderNumber …) werden übersprungen. "
+          "Vorher get_hmi_config aufrufen um verfügbare Schlüssel zu sehen.",
+          {"device_name": {"type": "string"},
+           "settings":    {"type": "object", "description": "Key-Value-Paare"}},
+          ["device_name", "settings"]),
+        T("export_hmi_config",
+          "HMI-Gerätekonfiguration als Excel exportieren — Advanced und Unified. "
+          "Advanced: ein Sheet mit gruppierten DeviceItem-Attributen (blau). "
+          "Unified: erstes Sheet DeviceItem-Attribute (grün), zweites Sheet RuntimeSettings. "
+          f"Standard: {_DEFAULT_EXPORT}\\hmi_config_<device>.xlsx",
+          {"device_name":  {"type": "string"},
+           "output_path":  {"type": "string", "description": "Optional: anderer Exportpfad (.xlsx)"}},
+          ["device_name"]),
         T("get_hmi_runtime_settings",
           "HMI Runtime-Einstellungen auslesen (nur WinCC Unified). "
           "Gibt alle Einstellungen rekursiv als JSON zurück. "
@@ -774,6 +795,9 @@ def _dispatch(name, a):
         case "get_project_info":           return tia.get_project_info()
         case "list_devices":               return tia.list_devices()
         case "export_hw_config":                return tia.export_hw_config(a.get("output_path"))
+        case "get_hmi_config":                  return tia.get_hmi_config(a["device_name"])
+        case "set_hmi_config":                  return tia.set_hmi_config(a["device_name"], a["settings"])
+        case "export_hmi_config":               return tia.export_hmi_config(a["device_name"], a.get("output_path"))
         case "get_hmi_runtime_settings":        return tia.get_hmi_runtime_settings(a["device_name"])
         case "set_hmi_runtime_settings":        return tia.set_hmi_runtime_settings(a["device_name"], a["settings"])
         case "export_hmi_runtime_settings":     return tia.export_hmi_runtime_settings(a["device_name"], a.get("output_path"))

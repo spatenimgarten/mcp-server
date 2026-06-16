@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.7.0"
+VERSION      = "1.8.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.8.0: get/set/export_hmi_config — HMI-DeviceItem-Attribute für Advanced UND Unified, Unified mit RuntimeSettings-Sheet",
         "1.7.0: get/set/export_plc_config — SPS-DeviceItem-Attribute lesen, schreiben, als Excel exportieren",
         "1.6.0: get/set/export_hmi_runtime_settings — Unified Runtime-Einstellungen lesen, schreiben, exportieren",
         "1.5.0: export_hw_config — Hardware-Konfiguration als Excel exportieren",
@@ -776,6 +777,249 @@ def _get_hmi_rs(device_name):
                                    f"'{device_name}' hat kein RuntimeSettings-Attribut (nur Unified unterstützt).", False)
                 return sw, rs
     raise TiaError("HMI_NOT_FOUND", f"HMI '{device_name}' nicht gefunden.", True)
+
+
+def _get_hmi_item(device_name):
+    """(DeviceItem, sw, hmi_type) für Advanced und Unified zurückgeben."""
+    import Siemens.Engineering as eng
+    sw_type = _get_sw_container_type()
+    all_names = []
+    for device in _iter_all_devices(_sess.project):
+        item_stack = list(device.DeviceItems)
+        while item_stack:
+            item = item_stack.pop()
+            sw = _try_get_software(item, "", sw_type, eng)
+            if sw:
+                all_names.append(item.Name)
+                if item.Name == device_name:
+                    full = type(sw).__module__ + "." + type(sw).__name__
+                    if "HmiUnified" in full:
+                        return item, sw, "Unified"
+                    if "Hmi" in full:
+                        return item, sw, "Advanced"
+            for sub in item.DeviceItems:
+                item_stack.append(sub)
+    raise TiaError("HMI_NOT_FOUND", f"HMI '{device_name}' nicht gefunden.", True,
+                   {"available": all_names})
+
+
+# Attribute die auf HMI-DeviceItems nicht sinnvoll schreibbar sind
+_HMI_READONLY_ATTRS = {
+    "Classification", "Container", "FirmwareVersion", "InstallationDate",
+    "IsBuiltIn", "IsPlugged", "Items", "Name", "OrderNumber",
+    "PositionNumber", "ShortDesignation", "TypeIdentifier",
+    "TypeIdentifierNormalized", "TypeName",
+}
+
+_HMI_ATTR_GROUPS = {
+    "Allgemein":      ["Name", "OrderNumber", "ShortDesignation", "FirmwareVersion",
+                       "TypeName", "Author", "Comment", "LocationIdentifier",
+                       "PlantDesignation", "AdditionalInformation", "InstallationDate"],
+    "Netzwerk":       ["InterfaceIpAddress", "InterfaceSubnetMask", "InterfaceDefaultGateway",
+                       "InterfaceMacAddress", "InterfaceDhcp",
+                       "PnDeviceName", "PnDnsConfiguration"],
+    "Display":        ["DisplayBrightness", "DisplayContrast", "DisplayOrientation",
+                       "DisplayResolutionX", "DisplayResolutionY", "DisplayScreenSaver",
+                       "DisplayScreenSaverTime", "TouchCalibration"],
+    "Runtime":        ["StartupScreenName", "LanguageDefaultName", "PasswordTimeout",
+                       "PasswordLevel", "ProjectName", "ProjectPath",
+                       "KeypadEnable", "MouseEnable", "TransferEnable"],
+    "Kommunikation":  ["MpiAddress", "MpiSubnet", "ProfibusDpAddress",
+                       "ProfibusDpSubnet", "S7Protocol", "SlotNumber", "RackNumber"],
+    "Sicherheit":     ["SecurityLevel", "UsbAccessEnabled", "SystemKeyEnable"],
+}
+
+
+def get_hmi_config(device_name):
+    def _run():
+        _sess.ensure_project()
+        item, sw, hmi_type = _get_hmi_item(device_name)
+        config = {}
+        for ai in item.GetAttributeInfos():
+            n = str(ai.Name)
+            v = item.GetAttribute(n)
+            config[n] = str(v) if v is not None else None
+        result = {"status": "ok", "device": device_name, "type": hmi_type, "config": config}
+        if hmi_type == "Unified":
+            rs = sw.GetAttribute("RuntimeSettings")
+            if rs is not None:
+                result["runtime_settings"] = _rs_to_dict(rs)
+        return result
+    return sta.run(_tia_call, _run)
+
+
+def set_hmi_config(device_name, settings: dict):
+    def _run():
+        _sess.ensure_project()
+        item, sw, hmi_type = _get_hmi_item(device_name)
+        applied_device, applied_rs, skipped = [], [], []
+
+        # Welche Keys gibt es auf DeviceItem und (Unified) auf RuntimeSettings?
+        device_keys = {str(ai.Name) for ai in item.GetAttributeInfos()}
+        rs = sw.GetAttribute("RuntimeSettings") if hmi_type == "Unified" else None
+        rs_keys = {str(ai.Name) for ai in rs.GetAttributeInfos()} if rs else set()
+
+        for key, val in settings.items():
+            if key in _HMI_READONLY_ATTRS:
+                skipped.append(key)
+                continue
+            if key in device_keys:
+                item.SetAttribute(key, val)
+                applied_device.append(key)
+            elif rs and key in rs_keys:
+                existing = rs.GetAttribute(key)
+                if existing is not None and hasattr(existing, "GetAttributeInfos"):
+                    skipped.append(key)
+                else:
+                    rs.SetAttribute(key, val)
+                    applied_rs.append(key)
+            else:
+                skipped.append(key)
+        return {
+            "status": "ok", "device": device_name, "type": hmi_type,
+            "applied_device": applied_device,
+            **({"applied_runtime_settings": applied_rs} if hmi_type == "Unified" else {}),
+            "skipped": skipped,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def export_hmi_config(device_name, output_path=None):
+    def _run():
+        _sess.ensure_project()
+        item, sw, hmi_type = _get_hmi_item(device_name)
+        config = {}
+        for ai in item.GetAttributeInfos():
+            n = str(ai.Name)
+            v = item.GetAttribute(n)
+            config[n] = str(v) if v is not None else None
+        rs_data = None
+        if hmi_type == "Unified":
+            rs = sw.GetAttribute("RuntimeSettings")
+            if rs is not None:
+                rs_data = _rs_to_dict(rs)
+        return hmi_type, config, rs_data
+
+    hmi_type, config, rs_data = sta.run(_tia_call, _run)
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise TiaError("MISSING_DEPENDENCY", "openpyxl nicht installiert.", False)
+
+    out = Path(output_path) if output_path else \
+        Path(_DEFAULT_EXPORT) / f"hmi_config_{device_name}.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"HMI Config ({hmi_type})"
+    thin   = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    hdr_color = "1F4E79" if hmi_type == "Advanced" else "375623"
+    for col, (h, w) in enumerate(zip(["Einstellung", "Wert", "Gruppe"], [40, 40, 22]), 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        c.fill      = PatternFill("solid", start_color=hdr_color)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border    = border
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 22
+
+    grp_fill = PatternFill("solid", start_color="D6E4F0")
+    val_fill = PatternFill("solid", start_color="F5FBFF")
+    alt_fill = PatternFill("solid", start_color="EAF4FB")
+    ro_font  = Font(name="Arial", size=10, color="808080")
+
+    def _write_group(ws, r, group, items_iter, ro_set):
+        c = ws.cell(row=r, column=1, value=group)
+        c.font = Font(name="Arial", bold=True, size=10)
+        c.fill = grp_fill; c.border = border
+        ws.cell(row=r, column=2).fill = grp_fill; ws.cell(row=r, column=2).border = border
+        ws.cell(row=r, column=3).fill = grp_fill; ws.cell(row=r, column=3).border = border
+        r += 1
+        for key, val in items_iter:
+            fill = val_fill if r % 2 == 0 else alt_fill
+            ro   = key in ro_set
+            ws.cell(row=r, column=1, value=f"  {key}").fill   = fill
+            ws.cell(row=r, column=1).font   = ro_font if ro else Font(name="Arial", size=10)
+            ws.cell(row=r, column=1).border = border
+            ws.cell(row=r, column=2, value=str(val) if val is not None else "").fill   = fill
+            ws.cell(row=r, column=2).font   = Font(name="Arial", size=10)
+            ws.cell(row=r, column=2).border = border
+            ws.cell(row=r, column=3, value=group).fill   = fill
+            ws.cell(row=r, column=3).font   = Font(name="Arial", size=10, color="808080")
+            ws.cell(row=r, column=3).border = border
+            r += 1
+        return r
+
+    r = 2
+    written = set()
+    for group, keys in _HMI_ATTR_GROUPS.items():
+        rows = [(k, config[k]) for k in keys if k in config]
+        if not rows:
+            continue
+        r = _write_group(ws, r, group, rows, _HMI_READONLY_ATTRS)
+        written.update(k for k, _ in rows)
+
+    remaining = {k: v for k, v in config.items() if k not in written}
+    if remaining:
+        r = _write_group(ws, r, "Sonstige", sorted(remaining.items()), _HMI_READONLY_ATTRS)
+
+    # Unified: RuntimeSettings als eigenes Sheet
+    if rs_data:
+        ws2 = wb.create_sheet("RuntimeSettings")
+        for col, (h, w) in enumerate(zip(["Einstellung", "Wert", "Gruppe"], [42, 36, 30]), 1):
+            c = ws2.cell(row=1, column=col, value=h)
+            c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+            c.fill      = PatternFill("solid", start_color="375623")
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border    = border
+            ws2.column_dimensions[get_column_letter(col)].width = w
+        ws2.row_dimensions[1].height = 22
+        r2 = 2
+        for key, val in rs_data.items():
+            if isinstance(val, dict):
+                c = ws2.cell(row=r2, column=1, value=key)
+                c.font = Font(name="Arial", bold=True, size=10)
+                c.fill = grp_fill; c.border = border
+                ws2.cell(row=r2, column=2).fill = grp_fill; ws2.cell(row=r2, column=2).border = border
+                ws2.cell(row=r2, column=3).fill = grp_fill; ws2.cell(row=r2, column=3).border = border
+                r2 += 1
+                for sk, sv in val.items():
+                    fill = val_fill if r2 % 2 == 0 else alt_fill
+                    ws2.cell(row=r2, column=1, value=f"  {sk}").fill   = fill
+                    ws2.cell(row=r2, column=1).font   = Font(name="Arial", size=10)
+                    ws2.cell(row=r2, column=1).border = border
+                    ws2.cell(row=r2, column=2, value=str(sv) if sv is not None else "").fill   = fill
+                    ws2.cell(row=r2, column=2).font   = Font(name="Arial", size=10)
+                    ws2.cell(row=r2, column=2).border = border
+                    ws2.cell(row=r2, column=3, value=key).fill   = fill
+                    ws2.cell(row=r2, column=3).font   = Font(name="Arial", size=10, color="808080")
+                    ws2.cell(row=r2, column=3).border = border
+                    r2 += 1
+            else:
+                fill = val_fill if r2 % 2 == 0 else alt_fill
+                ws2.cell(row=r2, column=1, value=key).fill   = fill
+                ws2.cell(row=r2, column=1).font   = Font(name="Arial", size=10, bold=True)
+                ws2.cell(row=r2, column=1).border = border
+                ws2.cell(row=r2, column=2, value=str(val) if val is not None else "").fill   = fill
+                ws2.cell(row=r2, column=2).font   = Font(name="Arial", size=10)
+                ws2.cell(row=r2, column=2).border = border
+                ws2.cell(row=r2, column=3).fill   = fill
+                ws2.cell(row=r2, column=3).border = border
+                r2 += 1
+        ws2.freeze_panes = "A2"
+
+    ws.freeze_panes = "A2"
+    wb.save(str(out))
+    total = len(config) + (sum(len(v) if isinstance(v, dict) else 1 for v in rs_data.values()) if rs_data else 0)
+    return {"status": "ok", "file": str(out), "device": device_name,
+            "type": hmi_type, "attributes": len(config),
+            **({"runtime_settings": sum(len(v) if isinstance(v, dict) else 1 for v in rs_data.values())} if rs_data else {})}
 
 
 def get_hmi_runtime_settings(device_name):

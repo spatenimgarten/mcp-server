@@ -163,6 +163,17 @@ attach_project / open_project
 | `import_hmi_scripts` | `device_name`, `file_path` | Scripts importieren |
 | `create_hmi_structure` | `device_name`, `structure` | Ordnerstruktur anlegen (experimentell) |
 
+### HMI: Konfiguration (Advanced & Unified)
+
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `get_hmi_config` | `device_name` | HMI-Gerätekonfiguration auslesen — Advanced **und** Unified (IP, Display, Runtime …); Unified zusätzlich mit RuntimeSettings |
+| `set_hmi_config` | `device_name`, `settings` | HMI-Gerätekonfiguration schreiben — Advanced und Unified; Unified schreibt auch RuntimeSettings-Keys |
+| `export_hmi_config` | `device_name`, [`output_path`] | Excel-Export: Advanced = 1 Sheet blau; Unified = Sheet Gerät (grün) + Sheet RuntimeSettings |
+| `get_hmi_runtime_settings` | `device_name` | Runtime-Einstellungen auslesen (nur Unified) |
+| `set_hmi_runtime_settings` | `device_name`, `settings` | Runtime-Einstellungen schreiben (nur Unified) |
+| `export_hmi_runtime_settings` | `device_name`, [`output_path`] | Runtime-Einstellungen als Excel (nur Unified) |
+
 ### Hardware & Projekt
 
 | Tool | Parameter | Beschreibung |
@@ -252,6 +263,9 @@ Basierend auf der WinCC-Projektstruktur:
 | Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
 | Scripts exportieren | `export_hmi_scripts` | ✅ VBScript |
 | Scripts importieren | `import_hmi_scripts` | ✅ VBScript |
+| Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem-Attribute (IP, Display, Runtime …) |
+| Gerätekonfiguration schreiben | `set_hmi_config` | ✅ skalare Attribute |
+| Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, gruppiert |
 | Alarme auflisten | `list_hmi_alarms` | ⚠️ V21: immer `[]` |
 | Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
 | Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
@@ -274,6 +288,9 @@ Basierend auf der WinCC-Projektstruktur:
 | Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
 | Scripts exportieren | `export_hmi_scripts` | ✅ JS/YML |
 | Scripts importieren | `import_hmi_scripts` | ✅ |
+| Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem + RuntimeSettings |
+| Gerätekonfiguration schreiben | `set_hmi_config` | ✅ DeviceItem + RuntimeSettings |
+| Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, 2 Sheets |
 | Tags anlegen / löschen | — | ❌ fehlt |
 | Connections lesen | — | ❌ fehlt |
 
@@ -362,6 +379,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.8.0 | 2026-06-16 | `get_hmi_config`, `set_hmi_config`, `export_hmi_config` — HMI-DeviceItem-Attribute für Advanced und Unified; Unified-Excel mit RuntimeSettings-Sheet |
 | 1.7.0 | 2026-06-16 | `get_plc_config`, `set_plc_config`, `export_plc_config` — CPU-Konfigurationsattribute lesen, schreiben und als Excel exportieren |
 | 1.6.0 | 2026-06-16 | `get_hmi_runtime_settings`, `set_hmi_runtime_settings`, `export_hmi_runtime_settings` — WinCC Unified Runtime-Einstellungen |
 | 1.5.0 | 2026-06-16 | `export_hw_config` — Hardware-Konfiguration aller Geräte als Excel exportieren |

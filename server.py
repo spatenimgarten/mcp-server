@@ -622,6 +622,25 @@ async def list_tools():
           {"device_name":{"type":"string"},
            "output_path":{"type":"string","description":"Optional: Zielordner"}},
           ["device_name"]),
+        T("list_hmi_screen_management",
+          "Screen-Management-Objekte auflisten: template, slidein, popup, global_elements, overview. "
+          "screen_type=None listet alle.",
+          {"device_name":{"type":"string"},
+           "screen_type":{"type":"string","description":"template|slidein|popup|global_elements|overview (optional)"}},
+          ["device_name"]),
+        T("export_hmi_screen_management",
+          "Screen-Management-Objekte exportieren (Advanced). "
+          "screen_type: template|slidein|global_elements|overview. Popup-Export nicht möglich in V21.",
+          {"device_name":{"type":"string"},
+           "screen_type":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zielordner"}},
+          ["device_name","screen_type"]),
+        T("import_hmi_screen_management",
+          "Screen-Management-Objekte importieren (Advanced). screen_type: template|slidein|popup|global_elements|overview.",
+          {"device_name":{"type":"string"},
+           "screen_type":{"type":"string"},
+           "file_path":{"type":"string"}},
+          ["device_name","screen_type","file_path"]),
         T("export_hmi_scripts",
           "HMI-Scripts (VB/JS) exportieren. output_path = Zielordner (optional).",
           {"device_name":{"type":"string"},
@@ -876,7 +895,10 @@ def _dispatch(name, a):
         case "import_hmi_cycles":           return tia.import_hmi_cycles(a["device_name"],a["file_path"])
         case "list_hmi_scheduled_tasks":   return tia.list_hmi_scheduled_tasks(a["device_name"])
         case "export_hmi_screen":          return tia.export_hmi_screen(a["device_name"],a["screen_name"],a["output_path"])
-        case "export_hmi_screens_all":     return tia.export_hmi_screens_all(a["device_name"],a.get("output_path"))
+        case "export_hmi_screens_all":          return tia.export_hmi_screens_all(a["device_name"],a.get("output_path"))
+        case "list_hmi_screen_management":      return tia.list_hmi_screen_management(a["device_name"],a.get("screen_type"))
+        case "export_hmi_screen_management":    return tia.export_hmi_screen_management(a["device_name"],a["screen_type"],a.get("output_path"))
+        case "import_hmi_screen_management":    return tia.import_hmi_screen_management(a["device_name"],a["screen_type"],a["file_path"])
         case "export_hmi_scripts":         return tia.export_hmi_scripts(a["device_name"],a.get("output_path"))
         case "import_hmi_scripts":         return tia.import_hmi_scripts(a["device_name"],a["file_path"])
         case "export_hmi_tags":            return tia.export_hmi_tags(a["device_name"],a.get("output_path"))

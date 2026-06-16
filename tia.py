@@ -2657,6 +2657,139 @@ def import_hmi_tags(device_name, file_path):
     return sta.run(_tia_call, _run)
 
 
+def _get_screen_variant_coll(sw, screen_type):
+    """Gibt (collection, item_attr) für den angefragten Screen-Typ zurück."""
+    if screen_type == "template":
+        f = getattr(sw, "ScreenTemplateFolder", None)
+        return (getattr(f, "ScreenTemplates", None) if f else None, "ScreenTemplates")
+    elif screen_type == "slidein":
+        f = getattr(sw, "ScreenSlideinFolder", None)
+        return (getattr(f, "ScreenSlideins", None) if f else None, "ScreenSlideins")
+    elif screen_type == "popup":
+        f = getattr(sw, "ScreenPopupFolder", None)
+        return (getattr(f, "ScreenPopups", None) if f else None, "ScreenPopups")
+    elif screen_type == "global_elements":
+        return (getattr(sw, "ScreenGlobalElements", None), "ScreenGlobalElements")
+    elif screen_type == "overview":
+        return (getattr(sw, "ScreenOverview", None), "ScreenOverview")
+    else:
+        raise TiaError("INVALID_SCREEN_TYPE",
+            f"Ungültiger screen_type '{screen_type}'. Gültig: template, slidein, popup, global_elements, overview", True)
+
+_SCREEN_VARIANT_TYPES = ["template", "slidein", "popup", "global_elements", "overview"]
+
+def list_hmi_screen_management(device_name, screen_type=None):
+    """
+    Screen-Management-Objekte eines Advanced-HMI auflisten.
+    screen_type: template | slidein | popup | global_elements | overview | None (alle)
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        types_to_check = [screen_type] if screen_type else _SCREEN_VARIANT_TYPES
+        result = {}
+        for stype in types_to_check:
+            try:
+                coll, _ = _get_screen_variant_coll(sw, stype)
+            except TiaError:
+                result[stype] = {"error": "invalid type"}
+                continue
+            if coll is None:
+                result[stype] = {"count": 0, "note": "nicht verfügbar"}
+                continue
+            # global_elements und overview sind einzelne Objekte, keine Collections
+            if stype in ("global_elements", "overview"):
+                result[stype] = {"type": type(coll).__name__, "has_export": hasattr(coll, "Export")}
+            else:
+                items = []
+                for i in range(coll.Count):
+                    item = coll[i]
+                    items.append({"name": str(item.Name)})
+                result[stype] = {"count": coll.Count, "items": items}
+        return {"device": device_name, "hmi_type": ht, "screen_management": result}
+    return sta.run(_tia_call, _run)
+
+def export_hmi_screen_management(device_name, screen_type, output_path=None):
+    """
+    Screen-Management-Objekte exportieren.
+    screen_type: template | slidein | global_elements | overview
+    (popup: kein Export in V21)
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir = Path(output_path) if output_path else _export_dir(None)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        coll, coll_attr = _get_screen_variant_coll(sw, screen_type)
+        if coll is None:
+            raise TiaError("SCREEN_MGMT_NOT_FOUND",
+                f"'{screen_type}' nicht verfügbar für '{device_name}'.", False)
+        exported = []
+        errors = []
+        # global_elements und overview: einzelne Objekte mit Export-Methode
+        if screen_type in ("global_elements", "overview"):
+            safe = screen_type.replace("_", "")
+            xml_file = out_dir / f"hmi_{safe}_{device_name}.xml"
+            if xml_file.exists():
+                xml_file.unlink()
+            try:
+                coll.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                exported.append({"name": screen_type, "file": str(xml_file)})
+            except Exception as ex:
+                errors.append({"name": screen_type, "error": str(ex)})
+        else:
+            # Collections: Export auf einzelnen Items
+            for i in range(coll.Count):
+                item = coll[i]
+                if not hasattr(item, "Export"):
+                    errors.append({"name": str(item.Name), "error": "kein Export"})
+                    continue
+                xml_file = out_dir / f"hmi_{screen_type}_{device_name}_{item.Name}.xml"
+                if xml_file.exists():
+                    xml_file.unlink()
+                try:
+                    item.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                    exported.append({"name": str(item.Name), "file": str(xml_file)})
+                except Exception as ex:
+                    errors.append({"name": str(item.Name), "error": str(ex)})
+        if not exported and errors:
+            raise TiaError("SCREEN_MGMT_EXPORT_FAILED", f"Export fehlgeschlagen: {errors}", False)
+        return {"status": "ok", "device": device_name, "screen_type": screen_type,
+                "exported": exported, "errors": errors, "count": len(exported)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_screen_management(device_name, screen_type, file_path):
+    """
+    Screen-Management-Objekte importieren.
+    screen_type: template | slidein | popup | global_elements | overview
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        fi = FileInfo(file_path)
+        if not fi.Exists:
+            raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
+        coll, _ = _get_screen_variant_coll(sw, screen_type)
+        if coll is None:
+            raise TiaError("SCREEN_MGMT_NOT_FOUND",
+                f"'{screen_type}' nicht verfügbar für '{device_name}'.", False)
+        if screen_type in ("global_elements", "overview"):
+            # Einzelobjekt: Import via HmiTarget-Methode
+            method = {"global_elements": "ImportScreenGlobalElements",
+                      "overview": "ImportScreenOverview"}.get(screen_type)
+            getattr(sw, method)(fi, eng.ImportOptions.Override)
+        else:
+            coll.Import(fi, eng.ImportOptions.Override)
+        return {"status": "ok", "device": device_name,
+                "screen_type": screen_type, "imported_from": file_path}
+    return sta.run(_tia_call, _run)
+
 def export_hmi_screens_all(device_name, output_path=None):
     """
     Alle HMI-Screens exportieren.

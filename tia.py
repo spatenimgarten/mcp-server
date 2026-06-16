@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.10.0"
+VERSION      = "1.11.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.11.0: list_hmi_logs — Unified DataLogs mit Segment, Settings, Backup-Attributen",
         "1.10.0: list_hmi_connections — nicht-integrierte HMI-Verbindungen (Advanced+Unified); list_hmi_textlists Fix: sucht alle Items der Station",
         "1.9.1: list_hmi_cycles — Periode/Einheit aus Name geparst wenn kein Attribut; GetAttributeInfos für alle Cycle-Attribute",
         "1.9.0: list_hmi_cycles + list_hmi_scheduled_tasks — Erfassungszyklen und geplante Tasks (Advanced/Unified)",
@@ -1394,6 +1395,49 @@ def _get_hmi_all_sw(station_name):
             if ht:
                 result.append((item.Name, sw, ht))
     return result
+
+
+def list_hmi_logs(device_name):
+    def _run():
+        _sess.ensure_project()
+        _, ht = _get_hmi(device_name)
+        logs = []
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "DataLogs"):
+                continue
+            for log in sw.DataLogs:
+                entry = {"name": str(log.Name)}
+                # Segment: Größe, Startzeit, Periode
+                try:
+                    seg = log.GetAttribute("Segment")
+                    entry["segment_max_size"]  = str(seg.GetAttribute("SegmentMaxSize") or "")
+                    entry["segment_start"]     = str(seg.GetAttribute("SegmentStartTime") or "")
+                    stp = seg.GetAttribute("SegmentTimePeriod")
+                    if stp and hasattr(stp, "GetAttributeInfos"):
+                        entry["segment_period"] = {str(ai.Name): str(stp.GetAttribute(str(ai.Name))) for ai in stp.GetAttributeInfos()}
+                except: pass
+                # Settings: Speicher, Gerät, Ordner
+                try:
+                    stg = log.GetAttribute("Settings")
+                    entry["log_max_size"]    = str(stg.GetAttribute("LogMaxSize") or "")
+                    entry["storage_device"]  = str(stg.GetAttribute("StorageDevice") or "")
+                    entry["storage_folder"]  = str(stg.GetAttribute("StorageFolder") or "")
+                    ltp = stg.GetAttribute("LogTimePeriod")
+                    if ltp and hasattr(ltp, "GetAttributeInfos"):
+                        entry["log_period"] = {str(ai.Name): str(ltp.GetAttribute(str(ai.Name))) for ai in ltp.GetAttributeInfos()}
+                except: pass
+                # Backup
+                try:
+                    bkp = log.GetAttribute("Backup")
+                    entry["backup_mode"]  = str(bkp.GetAttribute("BackupMode") or "")
+                    entry["backup_path"]  = str(bkp.GetAttribute("PrimaryPath") or "")
+                except: pass
+                logs.append(entry)
+        note = None if logs else "DataLogs nicht verfügbar (V21-Limitation oder Advanced)"
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "logs": logs, "count": len(logs),
+                **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
 
 
 def list_hmi_connections(device_name):

@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.10.0"
+VERSION      = "1.11.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -557,6 +557,10 @@ async def list_tools():
           {"device_name":{"type":"string"},"table_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_alarms",    "Alarme eines HMI.",
           {"device_name":{"type":"string"}}, ["device_name"]),
+        T("list_hmi_logs",
+          "HMI-Datenlogs auflisten (Unified). "
+          "Liefert Name, Segmentgröße, Speicherdauer, Speicherort und Backup-Einstellungen.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_connections",
           "HMI-Verbindungen auflisten (Advanced und Unified). "
           "Liefert Name, Kommunikationstreiber, Partner-PLC, Station, Node und IP-Adresse. "
@@ -822,6 +826,7 @@ def _dispatch(name, a):
         case "list_hmi_screens":           return tia.list_hmi_screens(a["device_name"])
         case "list_hmi_tags":              return tia.list_hmi_tags(a["device_name"],a.get("table_name"))
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])
+        case "list_hmi_logs":              return tia.list_hmi_logs(a["device_name"])
         case "list_hmi_connections":       return tia.list_hmi_connections(a["device_name"])
         case "list_hmi_textlists":         return tia.list_hmi_textlists(a["device_name"])
         case "list_hmi_cycles":            return tia.list_hmi_cycles(a["device_name"])

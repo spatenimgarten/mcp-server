@@ -1,7 +1,7 @@
 # TIA Portal MCP Server — Validierungs-Checkliste
 
 `server.py · tia.py  —  TIA Portal V21 Openness`  
-41 registrierte MCP-Tools.
+47 registrierte MCP-Tools.
 
 **Zweck:** Vor jedem Release / Commit prüfen ob alle MCP-Tools korrekt reagieren.  
 **Testprojekt Advanced:** `F:\02_Projekte\AI\Projekt2\Projekt2.ap21` · PLC: `PLC_1` · HMI: `HMI_Station_1`, `HMI_Station_2`  
@@ -133,6 +133,46 @@
 
 ---
 
+## 7b — HMI: Konfiguration (Advanced & Unified) — v1.8.0
+
+> `get_hmi_config` / `set_hmi_config` / `export_hmi_config` funktionieren für **beide** HMI-Typen.  
+> Advanced: liest DeviceItem-Attribute (IP, Display, Runtime …).  
+> Unified: DeviceItem-Attribute + RuntimeSettings (separates Excel-Sheet).  
+> Die alten `get/set/export_hmi_runtime_settings`-Tools (Unified-only) bleiben als Alternative erhalten.
+
+| # | Tool | Parameter | Advanced | Unified | Notiz |
+|---|---|---|:---:|:---:|---|
+| 7b.1 | `get_hmi_config` | `device_name=<HMI>` | 🔄 | 🔄 | [Adv] JSON mit DeviceItem-Attributen, `type:"Advanced"`. [Uni] Zusätzlich `runtime_settings`-Feld. |
+| 7b.2 | `set_hmi_config` | `device_name=<HMI>, settings={...}` | 🔄 | 🔄 | Schreibgeschützte Attrs (Name, OrderNumber …) in `skipped`. [Uni] RuntimeSettings-Keys in `applied_runtime_settings`. |
+| 7b.3 | `export_hmi_config` | `device_name=<HMI>` | 🔄 | 🔄 | [Adv] Excel mit blauem Header, 1 Sheet. [Uni] Excel mit grünem Header, 2 Sheets (Gerät + RuntimeSettings). |
+| 7b.4 | `export_hmi_config` | `device_name=<HMI>, output_path="C:\tia-mcp\export\test_hmi.xlsx"` | 🔄 | 🔄 | Benutzerdefinierter Exportpfad wird verwendet. |
+
+---
+
+## 5b — PLC: Konfiguration — v1.7.0
+
+> Liest und schreibt DeviceItem-Attribute der CPU (nicht PlcSoftware).  
+> Typische Attribute: OrderNumber, FirmwareVersion, CycleMinimumCycleTime, WebserverActivate, SNMPActive, OpcUaPurchasedLicense …  
+> `device_name` = DeviceItem-Name (z.B. `PLC_1`).
+
+| # | Tool | Parameter | Status | Notiz |
+|---|---|---|:---:|---|
+| 5b.1 | `get_plc_config` | `device_name="PLC_1"` | 🔄 | Erwartet: JSON mit allen DeviceItem-Attributen, `type:"ok"`. |
+| 5b.2 | `set_plc_config` | `device_name="PLC_1", settings={"WebserverActivate": false}` | 🔄 | Schreibgeschützte Attrs (OrderNumber …) in `skipped_readonly`. |
+| 5b.3 | `export_plc_config` | `device_name="PLC_1"` | 🔄 | Excel mit Gruppen Allgemein, Zyklus, Startup, Zeitzone, Netzwerk, OPC UA, Sicherheit usw. |
+| 5b.4 | `export_plc_config` | `device_name="PLC_1", output_path="C:\tia-mcp\export\test_plc.xlsx"` | 🔄 | Benutzerdefinierter Exportpfad. |
+
+---
+
+## 5c — Hardware-Konfiguration — v1.5.0
+
+| # | Tool | Parameter | Status | Notiz |
+|---|---|---|:---:|---|
+| 5c.1 | `export_hw_config` | *(keine)* | 🔄 | Excel mit Station, Komponente, Bestellnummer, Slot, IP aller Geräte. |
+| 5c.2 | `export_hw_config` | `output_path="C:\tia-mcp\export\test_hw.xlsx"` | 🔄 | Benutzerdefinierter Exportpfad. |
+
+---
+
 ## 8 — Bibliotheken
 
 > Falls keine Typen oder Master Copies vorhanden: `count:0` ist korrektes Ergebnis.
@@ -208,20 +248,16 @@
 
 ## 13 — Abgrenzung: Nicht implementierte Tools
 
-Tools aus dem README die in `server.py` / `tia.py` **nicht** implementiert sind (geplant):
+Tools die geplant aber noch nicht implementiert sind:
 
 | Nicht implementiert | Äquivalent / Workaround |
 |---|---|
-| `list_plc_blocks()` | `execute_openness` (Block-Stack über `plc.BlockGroup`) |
-| `list_plc_tags()` | `execute_openness` |
-| `list_plc_udts()` | `execute_openness` |
 | `get_cross_references()` | — geplant |
 | `find_unused_plc_tags()` | — geplant |
 | `find_unused_hmi_tags()` | — geplant |
 | `delete_plc_tag()` | — geplant |
 | `delete_hmi_tag()` | — geplant |
-| `find_libraries()` | — geplant |
-| `open_library()` | — geplant |
+| `export_library_type()` | — geplant |
 | `use_library_type()` | — geplant |
 | `create_plc_tag_table()` | `execute_openness (mode=write)` |
 | `create_plc_tag()` | `execute_openness (mode=write)` |
@@ -274,5 +310,8 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | V0.3–V0.9 | 2026-06-13–14 | Claude Sonnet 4.6 | Iterative HMI-Erweiterungen, Unified/Advanced-Weiche, Testprojekt-Aufbau, BUG-11–14 identifiziert. |
 | V1.0 | 2026-06-14 | Claude Sonnet 4.6 (MCP-automatisiert) | tia.py v1.2.0 deployed. Alle BUGs 11–14 gefixt. Vollständiger Testdurchlauf Advanced + Unified. Ergebnis: PLC ✅, HMI-Lesen ✅, Tag-Export/Import ✅, Screen-Export Advanced ✅, Script-Export/Import ✅. V21-Limitationen dokumentiert. STA-Timeout + Auto-Restart implementiert. |
 | V1.1 | 2026-06-15 | Claude Sonnet 4.6 | tia.py v1.3.0: 4 neue PLC-List-Tools (`list_plc_blocks`, `list_plc_tag_tables`, `list_plc_tags`, `list_plc_udts`). Abschnitt 3 in TESTING.md um Tests 3.1–3.6 erweitert. |
+| V1.2 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.5–1.6: `export_hw_config`, `get/set/export_hmi_runtime_settings`. TESTING.md: Abschnitte 5c, 7b (HMI-Konfiguration) angelegt. |
+| V1.3 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.7.0: `get/set/export_plc_config`. Abschnitt 5b in TESTING.md ergänzt. |
+| V1.4 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.8.0: `get/set/export_hmi_config` mit Advanced/Unified-Weiche. Abschnitt 7b um neue Tools erweitert. Tool-Zähler auf 47. |
 
 | V0.6 | 2026-06-13 | Claude Sonnet 4.6 | Advanced/Unified-Weiche für alle HMI-Tools. Neue Hilfsfunktionen: `_hmi_screens()`, `_hmi_screens_import()`, `_hmi_screen_folders()`, `_hmi_tag_folders()`. Neues Tool: `create_hmi_structure`. Testabschnitte 6+7 um Unified-Spalte erweitert. README: API-Unterschiede-Tabelle ergänzt. |

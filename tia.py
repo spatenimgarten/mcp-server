@@ -6,7 +6,7 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.9.2"
+VERSION      = "1.9.3"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
@@ -1326,26 +1326,24 @@ def list_hmi_cycles(device_name):
             import re as _re
             for c in src:
                 name = str(c.Name)
-                entry = {"name": name}
-                # Alle Attribute via GetAttributeInfos lesen
+                is_system = None
                 if hasattr(c, "GetAttributeInfos"):
                     for ai in c.GetAttributeInfos():
                         n = str(ai.Name)
-                        v = c.GetAttribute(n)
-                        entry[n] = str(v) if v is not None else None
-                else:
-                    # Fallback: bekannte Attributnamen probieren
-                    for attr in ["Period", "CyclePeriod", "PeriodUnit", "Unit", "Comment"]:
-                        v = getattr(c, attr, None)
-                        if v is not None:
-                            entry[attr] = str(v)
-                # Falls keine Zeitangabe aus Attributen: Namen parsen
-                if not any(k in entry for k in ["Period", "CyclePeriod"]):
-                    m = _re.match(r"^([\d.]+)\s*(\w+)$", name.strip())
-                    if m:
-                        entry["_period_parsed"] = m.group(1)
-                        entry["_unit_parsed"]   = m.group(2)
-                cycles.append(entry)
+                        if n == "IsSystemObject":
+                            is_system = str(c.GetAttribute(n)) == "True"
+                # Periode und Einheit aus Namen parsen ("120 s" → 120, "s")
+                period = unit = None
+                m = _re.match(r"^([\d.]+)\s*(\w+)$", name.strip())
+                if m:
+                    period = m.group(1)
+                    unit   = m.group(2)
+                cycles.append({
+                    "name":      name,
+                    "period":    period,
+                    "unit":      unit,
+                    "system":    is_system,
+                })
         note = None if src is not None else "CycleFolder/Cycles nicht verfügbar (V21-Limitation oder Unified)"
         return {"device": device_name, "hmi_type": ht, "cycles": cycles,
                 "count": len(cycles), **({"note": note} if note else {})}

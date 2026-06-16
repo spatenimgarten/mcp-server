@@ -6,7 +6,7 @@ Claude Desktop: %APPDATA%\Claude\claude_desktop_config.json
     "args":["C:/tia-mcp/server.py"], "cwd":"C:/tia-mcp" } } }
 """
 
-import json, asyncio, socket, sys
+import json, asyncio, socket, sys, threading
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
@@ -31,6 +31,16 @@ _is_primary = False
 _rpc_server = None
 _com_lock   = None          # asyncio.Lock — serialisiert COM-Zugriffe im Primär
 
+# ── Background-Task ────────────────────────────────────────────────────────────
+# Lange TIA-Operationen (open_project, create_project, compile_plc) laufen in
+# einem Thread und geben sofort "pending" zurück. get_session_status zeigt den
+# aktuellen Stand. Nur im Primär relevant.
+
+_LONG_RUNNING = {"open_project", "create_project", "compile_plc", "close_portal", "execute_openness"}
+
+_bg_lock   = threading.Lock()
+_bg_status = {"running": False, "tool": None, "result": None, "error": None}
+
 
 async def _rpc_handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     """Primär: eingehende RPC-Anfrage von einer Proxy-Instanz bearbeiten."""
@@ -39,7 +49,12 @@ async def _rpc_handle_client(reader: asyncio.StreamReader, writer: asyncio.Strea
         if not data:
             return
         req  = json.loads(data)
-        result = _dispatch(req["tool"], req.get("args", {}))
+        tool, args = req["tool"], req.get("args", {})
+        if tool in _LONG_RUNNING:
+            result = _start_bg(tool, args)
+        else:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: _dispatch(tool, args))
         response = json.dumps({"ok": True, "result": result}, ensure_ascii=False)
     except TiaError as e:
         response = json.dumps({"ok": False, "error": e.to_dict()}, ensure_ascii=False)
@@ -71,6 +86,31 @@ async def _rpc_call(name: str, args: dict):
         raise TiaError(err.get("code", "PROXY_ERROR"), err.get("message", str(err)), False)
     finally:
         writer.close()
+
+
+def _start_bg(name: str, args: dict) -> dict:
+    """Startet eine lange Operation im Background-Thread. Sofortige Rückkehr."""
+    with _bg_lock:
+        if _bg_status["running"]:
+            return {"status": "busy", "message": f"Läuft bereits: {_bg_status['tool']}. Warte auf Abschluss."}
+        _bg_status.update({"running": True, "tool": name, "result": None, "error": None})
+
+    def _run():
+        try:
+            r = _dispatch(name, args)
+            with _bg_lock:
+                _bg_status.update({"running": False, "result": r, "error": None})
+        except TiaError as e:
+            with _bg_lock:
+                _bg_status.update({"running": False, "result": None, "error": e.to_dict()})
+        except Exception as e:
+            with _bg_lock:
+                _bg_status.update({"running": False, "result": None,
+                                   "error": {"status": "error", "code": "UNEXPECTED", "message": str(e)}})
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "pending", "tool": name,
+            "message": "Läuft im Hintergrund. get_session_status aufrufen um Fortschritt zu prüfen."}
 
 
 async def _start_primary() -> bool:
@@ -416,6 +456,11 @@ async def list_tools():
         return types.Tool(name=name, description=desc, inputSchema=schema)
 
     return [
+        T("create_project",
+          "Neues TIA Portal Projekt anlegen. Läuft im Hintergrund — get_session_status zum Prüfen. "
+          "path = Zielordner (wird angelegt), name = Projektname (optional, Standard: Ordnername).",
+          {"path": {"type": "string"}, "name": {"type": "string"}},
+          ["path"]),
         T("open_portal",
           "TIA Portal starten — neuen Prozess erzeugen. "
           "mode='gui': mit Oberflaeche (Standard). "
@@ -639,8 +684,12 @@ async def call_tool(name, arguments):
     log.info(f"Tool [{mode}]: {name}  keys={list(a.keys())}")
     try:
         if _is_primary:
-            async with _com_lock:
-                result = _dispatch(name, a)
+            if name in _LONG_RUNNING:
+                result = _start_bg(name, a)
+            else:
+                async with _com_lock:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda: _dispatch(name, a))
         else:
             result = await _rpc_call(name, a)
         return [types.TextContent(type="text",
@@ -664,7 +713,19 @@ def _dispatch(name, a):
         case "save_project":               return tia.save_project()
         case "close_project":              return tia.close_project()
         case "close_portal":               return tia.close_portal()
-        case "get_session_status":         return tia.get_session_status()
+        case "get_session_status":
+            s = tia.get_session_status()
+            with _bg_lock:
+                bg = dict(_bg_status)
+            if bg["running"]:
+                s["background_task"] = {"running": True, "tool": bg["tool"]}
+            elif bg["tool"] and not bg["running"]:
+                s["background_task"] = {
+                    "running": False, "tool": bg["tool"],
+                    "result": bg["result"], "error": bg["error"]
+                }
+                _bg_status.update({"tool": None, "result": None, "error": None})
+            return s
         case "get_version":                return {
                                                "server": {"version": VERSION, "date": VERSION_DATE, "file": __file__},
                                                "tia":    tia.VERSION_INFO,
@@ -709,8 +770,12 @@ def _dispatch(name, a):
         case "set_plc_block_source":       return tia.set_plc_block_source(a["device_name"],a["block_name"],a["scl_source"])
         case "write_import_file":          return tia.write_import_file(a["filename"],a["content"])
         case "read_export_file":           return tia.read_export_file(a["file_path"])
+        case "create_project":
+            path = a["path"]
+            name_ = a.get("name", path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
+            proj = portal.Projects.Create(path, name_)
+            return {"status": "ok", "name": proj.Name, "path": safe_str(proj.Path)}
         case "restart_server":
-            import threading
             threading.Timer(0.5, sys.exit, args=[0]).start()
             role = "primaer" if _is_primary else "proxy (Anfrage weitergeleitet)"
             return {"status": "ok", "message": f"Server wird neu gestartet (Rolle: {role})"}

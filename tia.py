@@ -1353,6 +1353,69 @@ def list_hmi_cycles(device_name):
     return sta.run(_tia_call, _run)
 
 
+def export_hmi_cycles(device_name, output_path=None):
+    """Zyklen als XML exportieren — eine Datei pro Zyklus."""
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        src = None
+        if hasattr(sw, "CycleFolder") and hasattr(sw.CycleFolder, "Cycles"):
+            src = sw.CycleFolder.Cycles
+        elif hasattr(sw, "Cycles"):
+            src = sw.Cycles
+        if src is None:
+            raise TiaError("CYCLES_NOT_SUPPORTED",
+                f"Cycles nicht verfügbar für HMI '{device_name}' ({ht}).", False)
+        out_dir = Path(output_path) if output_path else _export_dir(None)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        exported = []
+        errors = []
+        seen = set()
+        for i in range(src.Count):
+            c = src[i]
+            name = str(c.Name)
+            safe_name = name.replace(" ", "_").replace("/", "_")
+            if safe_name in seen:
+                continue
+            seen.add(safe_name)
+            xml_file = out_dir / f"hmi_cycle_{device_name}_{safe_name}.xml"
+            if xml_file.exists():
+                xml_file.unlink()
+            try:
+                c.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                exported.append({"name": name, "file": str(xml_file)})
+            except Exception as ex:
+                errors.append({"name": name, "error": str(ex)})
+        if not exported and errors:
+            raise TiaError("CYCLE_EXPORT_FAILED", f"Kein Zyklus exportierbar: {errors}", False)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "exported": exported, "errors": errors, "count": len(exported)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_cycles(device_name, file_path):
+    """Zyklen aus XML importieren (Override). Gegenstück zu export_hmi_cycles."""
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        fi = FileInfo(file_path)
+        if not fi.Exists:
+            raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
+        src = None
+        if hasattr(sw, "CycleFolder") and hasattr(sw.CycleFolder, "Cycles"):
+            src = sw.CycleFolder.Cycles
+        elif hasattr(sw, "Cycles"):
+            src = sw.Cycles
+        if src is None:
+            raise TiaError("CYCLES_NOT_SUPPORTED",
+                f"Cycles nicht verfügbar für HMI '{device_name}' ({ht}).", False)
+        src.Import(fi, eng.ImportOptions.Override)
+        return {"status": "ok", "device": device_name, "imported_from": file_path}
+    return sta.run(_tia_call, _run)
+
 def list_hmi_scheduled_tasks(device_name):
     def _run():
         _sess.ensure_project(); sw, ht = _get_hmi(device_name)

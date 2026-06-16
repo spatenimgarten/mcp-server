@@ -2655,48 +2655,60 @@ def import_hmi_alarms(device_name, file_path):
 
 def export_hmi_textlists(device_name, output_path=None):
     """
-    HMI-Textlisten als XML exportieren.
-    Gegenstück zu list_hmi_textlists / import_hmi_textlists.
-    output_path: Zieldatei (Standard: C:\\tia-mcp\\export\\hmi_textlists_<device>.xml).
+    HMI-Textlisten als XML exportieren — eine Datei pro Textliste.
+    output_path: Zielordner (Standard: C:\\tia-mcp\\export\\).
+    Gibt Liste aller exportierten Dateien zurück.
     """
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
         from System.IO import FileInfo
-        sw, ht = _get_hmi(device_name)
-        out_dir  = _export_dir(None if output_path and Path(output_path).suffix else output_path)
-        xml_file = Path(output_path) if (output_path and Path(output_path).suffix) \
-                   else out_dir / f"hmi_textlists_{device_name}.xml"
-        xml_file.parent.mkdir(parents=True, exist_ok=True)
-        if xml_file.exists(): xml_file.unlink()
-        tl = getattr(sw, "TextLists", None)
-        if not tl or not hasattr(tl, "Export"):
+        _, ht = _get_hmi(device_name)
+        out_dir = Path(output_path) if output_path else _export_dir(None)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        exported = []
+        errors = []
+        all_sw = _get_hmi_all_sw(device_name)
+        for _item_name, sw, _ht in all_sw:
+            if not hasattr(sw, "TextLists"):
+                continue
+            tl_coll = sw.TextLists
+            for tl in tl_coll:
+                xml_file = out_dir / f"hmi_tl_{device_name}_{tl.Name}.xml"
+                if xml_file.exists():
+                    xml_file.unlink()
+                try:
+                    tl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                    exported.append({"name": tl.Name, "file": str(xml_file)})
+                except Exception as ex:
+                    errors.append({"name": tl.Name, "error": str(ex)})
+        if not exported:
             raise TiaError("TEXTLIST_EXPORT_NOT_SUPPORTED",
-                f"Kein Textlisten-Export für HMI '{device_name}' ({ht}) verfügbar.", False)
-        tl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                f"Keine Textlisten exportierbar. sw_count={len(all_sw)}, errors={errors}", False)
         return {"status": "ok", "device": device_name, "hmi_type": ht,
-                "xml_path": str(xml_file)}
+                "exported": exported, "count": len(exported)}
     return sta.run(_tia_call, _run)
 
 def import_hmi_textlists(device_name, file_path):
     """
-    HMI-Textlisten aus XML importieren.
+    HMI-Textlisten aus XML importieren (eine Datei, Override).
     Gegenstück zu export_hmi_textlists.
     """
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
         from System.IO import FileInfo
-        sw, ht = _get_hmi(device_name)
+        _, ht = _get_hmi(device_name)
         fi = FileInfo(file_path)
         if not fi.Exists:
             raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
-        tl = getattr(sw, "TextLists", None)
-        if not tl or not hasattr(tl, "Import"):
-            raise TiaError("TEXTLIST_IMPORT_NOT_SUPPORTED",
-                f"Kein Textlisten-Import für HMI '{device_name}' ({ht}) verfügbar.", False)
-        tl.Import(fi, eng.ImportOptions.Override)
-        return {"status": "ok", "device": device_name, "imported_from": file_path}
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "TextLists"):
+                continue
+            sw.TextLists.Import(fi, eng.ImportOptions.Override)
+            return {"status": "ok", "device": device_name, "imported_from": file_path}
+        raise TiaError("TEXTLIST_IMPORT_NOT_SUPPORTED",
+            f"Kein Textlisten-Import für HMI '{device_name}' ({ht}) verfügbar.", False)
     return sta.run(_tia_call, _run)
 
 def create_hmi_structure(device_name, structure):

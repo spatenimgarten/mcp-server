@@ -879,7 +879,7 @@ def _dispatch(name, a):
             proj = portal.Projects.Create(path, name_)
             return {"status": "ok", "name": proj.Name, "path": safe_str(proj.Path)}
         case "restart_server":
-            threading.Timer(0.5, sys.exit, args=[0]).start()
+            threading.Timer(0.5, os._exit, args=[0]).start()
             role = "primaer" if _is_primary else "proxy (Anfrage weitergeleitet)"
             return {"status": "ok", "message": f"Server wird neu gestartet (Rolle: {role})"}
         case _: raise TiaError("UNKNOWN_TOOL",f"Unbekanntes Tool: {name}",False)

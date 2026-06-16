@@ -1,15 +1,17 @@
-"""
-export_hmi_all.py — Vollexport eines HMI-Geräts
+r"""
+export_hmi_all.py -- Vollexport eines HMI-Geraets
 
-Exportiert alle verfügbaren Komponenten eines HMI (Advanced oder Unified)
+Exportiert alle verfuegbaren Komponenten eines HMI (Advanced oder Unified)
 in einen timestamped Unterordner unter C:\tia-mcp\export\.
 
 Aufruf:
-    python export_hmi_all.py <device_name>
-    python export_hmi_all.py <device_name> --out C:\mein\pfad
-    python export_hmi_all.py --list          (alle Geräte anzeigen)
+    python export_hmi_all.py <item_name>
+    python export_hmi_all.py <item_name> --out C:\mein\pfad
+    python export_hmi_all.py --list       (alle Geraete + Item-Namen anzeigen)
 
 Voraussetzung: TIA Portal muss laufen und ein Projekt offen sein.
+Der item_name ist der Software-Item-Name (z.B. HMI_RT_1), nicht der
+Geraetename (z.B. HMI_Advanced). --list zeigt beide.
 """
 
 import sys
@@ -21,31 +23,44 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import tia
 
-# ─── Hilfsfunktionen ───────────────────────────────────────────────────────────
+# ─── Ausgabe-Hilfsfunktionen ───────────────────────────────────────────────────
 
 def _ok(label, result):
+    if not isinstance(result, dict):
+        print(f"  OK  {label}")
+        return
     count = result.get("count", "")
     extra = f" ({count})" if count != "" else ""
     files = result.get("files") or result.get("exported") or []
     if files and isinstance(files, list):
-        extra += f" → {len(files)} Datei(en)"
-    elif result.get("xml_path") or result.get("json_path"):
-        p = result.get("xml_path") or result.get("json_path")
-        extra += f" → {Path(p).name}"
-    print(f"  ✓  {label}{extra}")
+        extra += f" -> {len(files)} Datei(en)"
+    elif result.get("xml_path") or result.get("json_path") or result.get("xlsx_path"):
+        p = result.get("xml_path") or result.get("json_path") or result.get("xlsx_path")
+        extra += f" -> {Path(p).name}"
+    print(f"  OK  {label}{extra}")
 
 
 def _skip(label, reason):
-    print(f"  –  {label}  [{reason}]")
+    print(f"  --  {label}  [{reason}]")
 
 
 def _fail(label, err):
-    code = err.get("code", "?")
-    msg  = err.get("message", str(err))
-    if "V21" in code or "NOT_SUPPORTED" in code or "LIMIT" in code:
-        print(f"  –  {label}  [V21-Limit]")
+    if isinstance(err, dict):
+        code = err.get("code", "?")
+        msg  = err.get("message", "")
+        rec  = err.get("recoverable", False)
     else:
-        print(f"  ✗  {label}  [{code}: {msg}]")
+        code = type(err).__name__
+        msg  = str(err)
+        rec  = False
+    # V21-Limits und "leer aber ok" als -- anzeigen
+    if any(x in code for x in ("V21", "NOT_SUPPORTED", "LIMIT", "NO_SCRIPTS",
+                                "NO_TAG_TABLES", "NO_CYCLES")):
+        print(f"  --  {label}  [nicht verfuegbar: {msg}]")
+    elif rec:
+        print(f"  --  {label}  [{code}: {msg}]")
+    else:
+        print(f"  XX  {label}  [{code}: {msg}]")
 
 
 def _call(label, fn, *args, **kwargs):
@@ -54,149 +69,175 @@ def _call(label, fn, *args, **kwargs):
         if isinstance(result, dict) and result.get("status") == "error":
             _fail(label, result)
             return None
-        _ok(label, result if isinstance(result, dict) else {})
+        _ok(label, result)
         return result
-    except Exception as e:
-        _fail(label, {"code": type(e).__name__, "message": str(e)})
+    except tia.TiaError as e:
+        _fail(label, {"code": e.code, "message": e.message, "recoverable": e.recoverable})
         return None
+    except Exception as e:
+        _fail(label, {"code": type(e).__name__, "message": str(e), "recoverable": False})
+        return None
+
+
+# ─── Geraete-Lookup ────────────────────────────────────────────────────────────
+
+def _find_hmi_item(device_name_or_item: str, devices: list):
+    """
+    Gibt (item_name, hmi_type) zurueck.
+    Sucht zuerst nach item_name (HMI_RT_1), dann nach device_name (HMI_Advanced).
+    """
+    # Direkt als item_name gefunden?
+    for d in devices:
+        for sw in d.get("software", []):
+            if sw.get("item") == device_name_or_item and sw.get("type") in ("Advanced", "Unified"):
+                return sw["item"], sw["type"]
+    # Als Geraete-Name gefunden?
+    for d in devices:
+        if d.get("name") == device_name_or_item:
+            for sw in d.get("software", []):
+                if sw.get("type") in ("Advanced", "Unified"):
+                    return sw["item"], sw["type"]
+    return None, None
 
 
 # ─── Hauptexport ───────────────────────────────────────────────────────────────
 
-def export_all(device_name: str, out_root: Path):
+def export_all(name_arg: str, out_root: Path, devices: list):
+    item_name, hmi_type = _find_hmi_item(name_arg, devices)
+    if not item_name:
+        print(f"\nFehler: '{name_arg}' nicht gefunden. --list zeigt verfuegbare Geraete.\n")
+        sys.exit(1)
+
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = out_root / f"{device_name}_{ts}"
+    out = out_root / f"{item_name}_{ts}"
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nExport: {device_name}  →  {out}\n")
+    print(f"\nExport: {item_name}  Typ: {hmi_type}")
+    print(f"Pfad:   {out}\n")
 
-    # HMI-Typ ermitteln — list_devices gibt {"name":..., "software":[{"type":...}]}
-    info = tia.list_devices()
-    devices = info.get("devices", []) if isinstance(info, dict) else []
-    hmi_type = "?"
-    for d in devices:
-        if d.get("name") == device_name:
-            sw = d.get("software", [])
-            hmi_type = sw[0].get("type", "?") if sw else "?"
-            break
-    print(f"  Gerät: {device_name}  Typ: {hmi_type}\n")
-
-    is_advanced = hmi_type == "Advanced"
-    is_unified  = hmi_type == "Unified"
+    is_adv = hmi_type == "Advanced"
+    is_uni = hmi_type == "Unified"
 
     # ── Konfiguration ─────────────────────────────────────────────────────────
     print("[ Konfiguration ]")
-    _call("HMI-Konfiguration",     tia.export_hmi_config,            device_name, str(out / "hmi_config.xlsx"))
-    if is_unified:
-        _call("Runtime-Einstellungen", tia.export_hmi_runtime_settings, device_name, str(out / "hmi_runtime_settings.xlsx"))
+    _call("HMI-Konfiguration",      tia.export_hmi_config,            item_name, str(out / "hmi_config.xlsx"))
+    if is_uni:
+        _call("Runtime-Einstellungen", tia.export_hmi_runtime_settings, item_name, str(out / "hmi_runtime_settings.xlsx"))
 
     # ── Screens ───────────────────────────────────────────────────────────────
     print("\n[ Screens ]")
-    if is_advanced:
-        _call("Alle Screens",          tia.export_hmi_screens_all,      device_name, str(out / "screens"))
-        _call("Screen Management",     tia.export_hmi_screen_management, device_name, "template",        str(out / "screen_mgmt" / "templates"))
-        _call("Screen Slideins",       tia.export_hmi_screen_management, device_name, "slidein",         str(out / "screen_mgmt" / "slideins"))
-        _call("Screen Popups",         tia.export_hmi_screen_management, device_name, "popup",           str(out / "screen_mgmt" / "popups"))
-        _call("Global Elements",       tia.export_hmi_screen_management, device_name, "global_elements", str(out / "screen_mgmt"))
-        _call("Screen Overview",       tia.export_hmi_screen_management, device_name, "overview",        str(out / "screen_mgmt"))
-    elif is_unified:
-        _skip("Alle Screens",          "V21-Limit — Unified Screens nicht exportierbar")
-        _call("Screen Management",     tia.export_hmi_screen_management, device_name, "template",        str(out / "screen_mgmt" / "templates"))
-        _call("Screen Slideins",       tia.export_hmi_screen_management, device_name, "slidein",         str(out / "screen_mgmt" / "slideins"))
-        _call("Screen Popups",         tia.export_hmi_screen_management, device_name, "popup",           str(out / "screen_mgmt" / "popups"))
-        _call("Global Elements",       tia.export_hmi_screen_management, device_name, "global_elements", str(out / "screen_mgmt"))
-        _call("Screen Overview",       tia.export_hmi_screen_management, device_name, "overview",        str(out / "screen_mgmt"))
+    if is_adv:
+        _call("Alle Screens",       tia.export_hmi_screens_all,       item_name, str(out / "screens"))
+    else:
+        _skip("Alle Screens",       "V21-Limit -- Unified Screens nicht exportierbar")
+
+    scr_out = str(out / "screen_mgmt")
+    _call("Templates",              tia.export_hmi_screen_management, item_name, "template",        scr_out + r"\templates")
+    _call("Slideins",               tia.export_hmi_screen_management, item_name, "slidein",         scr_out + r"\slideins")
+    _call("Popups",                 tia.export_hmi_screen_management, item_name, "popup",           scr_out + r"\popups")
+    _call("Global Elements",        tia.export_hmi_screen_management, item_name, "global_elements", scr_out)
+    _call("Screen Overview",        tia.export_hmi_screen_management, item_name, "overview",        scr_out)
 
     # ── Tags ──────────────────────────────────────────────────────────────────
     print("\n[ Tags ]")
-    _call("HMI-Tags (alle Tabellen)", tia.export_hmi_tags,             device_name, str(out / "tags"))
+    _call("HMI-Tags",               tia.export_hmi_tags,              item_name, str(out / "tags"))
 
     # ── Verbindungen ──────────────────────────────────────────────────────────
     print("\n[ Verbindungen ]")
-    _call("Connections",              tia.export_hmi_connections,       device_name, str(out / "hmi_connections.json"))
+    _call("Connections",            tia.export_hmi_connections,       item_name, str(out / "hmi_connections.json"))
 
     # ── Alarme ────────────────────────────────────────────────────────────────
     print("\n[ Alarme ]")
-    if is_advanced:
-        _skip("Alarme", "V21-Limit — Advanced DiscreteAlarms nicht zugänglich")
+    if is_adv:
+        _skip("Alarme",             "V21-Limit -- Advanced DiscreteAlarms nicht zugaenglich")
     else:
-        _call("Alarme (JSON)",        tia.export_hmi_alarms,            device_name, str(out / "hmi_alarms.json"))
+        _call("Alarme (JSON)",      tia.export_hmi_alarms,            item_name, str(out / "hmi_alarms.json"))
 
     # ── Textlisten & Grafiklisten ─────────────────────────────────────────────
     print("\n[ Text- und Grafiklisten ]")
-    _call("Textlisten",               tia.export_hmi_textlists,         device_name, str(out / "textlists"))
-    _call("Grafiklisten",             tia.export_hmi_graphic_lists,     device_name, str(out / "graphic_lists"))
+    _call("Textlisten",             tia.export_hmi_textlists,         item_name, str(out / "textlists"))
+    _call("Grafiklisten",           tia.export_hmi_graphic_lists,     item_name, str(out / "graphic_lists"))
 
     # ── Scripts ───────────────────────────────────────────────────────────────
     print("\n[ Scripts ]")
-    _call("Scripts",                  tia.export_hmi_scripts,           device_name, str(out / "scripts"))
+    _call("Scripts",                tia.export_hmi_scripts,           item_name, str(out / "scripts"))
 
     # ── Zyklen ────────────────────────────────────────────────────────────────
     print("\n[ Erfassungszyklen ]")
-    if is_advanced:
-        _call("Cycles (XML)",         tia.export_hmi_cycles,            device_name, str(out / "cycles"))
+    if is_adv:
+        _call("Cycles (XML)",       tia.export_hmi_cycles,            item_name, str(out / "cycles"))
     else:
-        _skip("Cycles", "V21-Limit — Unified Cycles nicht exportierbar")
+        _skip("Cycles",             "V21-Limit -- Unified Cycles nicht exportierbar")
 
     # ── Datenlogs ─────────────────────────────────────────────────────────────
     print("\n[ Datenlogs ]")
-    if is_unified:
-        logs = _call("Datenlogs lesen", tia.list_hmi_logs, device_name)
+    if is_uni:
+        logs = _call("Datenlogs lesen", tia.list_hmi_logs, item_name)
         if logs:
             p = out / "hmi_logs.json"
             p.write_text(json.dumps(logs, indent=2, ensure_ascii=False), encoding="utf-8")
-            print(f"       → {p.name}")
+            print(f"       -> {p.name}")
     else:
-        _skip("Datenlogs", "V21-Limit — Advanced DataLogs nicht zugänglich")
+        _skip("Datenlogs",          "V21-Limit -- Advanced DataLogs nicht zugaenglich")
 
     # ── Zusammenfassung ───────────────────────────────────────────────────────
-    files = list(out.rglob("*"))
-    file_count = sum(1 for f in files if f.is_file())
-    size_kb = sum(f.stat().st_size for f in files if f.is_file()) // 1024
+    all_files  = [f for f in out.rglob("*") if f.is_file()]
+    file_count = len(all_files)
+    size_kb    = sum(f.stat().st_size for f in all_files) // 1024
 
-    print(f"\n{'─'*60}")
-    print(f"  Fertig: {file_count} Dateien · {size_kb} KB")
-    print(f"  Pfad:   {out}")
-    print(f"{'─'*60}\n")
+    print(f"\n{'='*60}")
+    print(f"  Fertig:  {file_count} Dateien  {size_kb} KB")
+    print(f"  Pfad:    {out}")
+    print(f"{'='*60}\n")
 
 
 # ─── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vollexport eines HMI-Geräts aus TIA Portal"
+        description="Vollexport eines HMI-Geraets aus TIA Portal"
     )
-    parser.add_argument("device_name", nargs="?", help="Name des HMI-Geräts")
-    parser.add_argument("--out",  default=r"C:\tia-mcp\export", help="Ausgabepfad (Standard: C:\\tia-mcp\\export)")
-    parser.add_argument("--list", action="store_true", help="Alle Geräte auflisten")
+    parser.add_argument("device_name", nargs="?",
+                        help="Item-Name des HMI (z.B. HMI_RT_1) -- --list zeigt alle")
+    parser.add_argument("--out", default=r"C:\tia-mcp\export",
+                        help=r"Ausgabepfad (Standard: C:\tia-mcp\export)")
+    parser.add_argument("--list", action="store_true",
+                        help="Alle Geraete mit Item-Namen anzeigen")
     args = parser.parse_args()
 
     tia._setup_logging()
     tia.sta.start()
 
-    # TIA Portal verbinden und Projekt übernehmen
+    # TIA Portal verbinden
     print("Verbinde mit TIA Portal...")
     r = tia.connect_portal(mode="attach")
     if isinstance(r, dict) and r.get("status") == "error":
         print(f"Fehler: {r.get('message')}")
         sys.exit(1)
-    print(f"  Verbunden — TIA {r.get('tia_version','?')}  PID {r.get('process_id','?')}")
+    print(f"  Verbunden -- TIA {r.get('tia_version','?')}  PID {r.get('process_id','?')}")
 
-    print("Übernehme offenes Projekt...")
+    # Projekt uebernehmen
+    print("Uebernehme offenes Projekt...")
     r = tia.attach_project()
     if isinstance(r, dict) and r.get("status") == "error":
         print(f"Fehler: {r.get('message')}")
         sys.exit(1)
     print(f"  Projekt: {r.get('project','?')}\n")
 
+    # Geraete laden (benoetigt fuer --list und Typ-Erkennung)
+    info    = tia.list_devices()
+    devices = info.get("devices", []) if isinstance(info, dict) else []
+
     if args.list:
-        result = tia.list_devices()
-        devices = result.get("devices", []) if isinstance(result, dict) else []
-        print("\nGeräte im Projekt:\n")
+        print("Geraete im Projekt:\n")
+        print(f"  {'Geraet':<25}  {'Item-Name':<25}  Typ")
+        print(f"  {'-'*25}  {'-'*25}  {'-'*10}")
         for d in devices:
-            sw = d.get("software", [])
-            types = ", ".join(s.get("type", "?") for s in sw) if sw else "—"
-            print(f"  {d.get('name','?'):30s}  {types}")
+            dname = d.get("name", "?")
+            for sw in d.get("software", []):
+                iname = sw.get("item", "?")
+                itype = sw.get("type", "?")
+                print(f"  {dname:<25}  {iname:<25}  {itype}")
         print()
         return
 
@@ -204,7 +245,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    export_all(args.device_name, Path(args.out))
+    export_all(args.device_name, Path(args.out), devices)
 
 
 if __name__ == "__main__":

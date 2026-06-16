@@ -70,12 +70,15 @@ def export_all(device_name: str, out_root: Path):
 
     print(f"\nExport: {device_name}  →  {out}\n")
 
-    # HMI-Typ ermitteln
+    # HMI-Typ ermitteln — list_devices gibt {"name":..., "software":[{"type":...}]}
     info = tia.list_devices()
     devices = info.get("devices", []) if isinstance(info, dict) else []
-    hmi_type = next(
-        (d.get("type", "?") for d in devices if d.get("name") == device_name), "?"
-    )
+    hmi_type = "?"
+    for d in devices:
+        if d.get("name") == device_name:
+            sw = d.get("software", [])
+            hmi_type = sw[0].get("type", "?") if sw else "?"
+            break
     print(f"  Gerät: {device_name}  Typ: {hmi_type}\n")
 
     is_advanced = hmi_type == "Advanced"
@@ -191,7 +194,9 @@ def main():
         devices = result.get("devices", []) if isinstance(result, dict) else []
         print("\nGeräte im Projekt:\n")
         for d in devices:
-            print(f"  {d.get('name','?'):30s}  {d.get('type','?')}")
+            sw = d.get("software", [])
+            types = ", ".join(s.get("type", "?") for s in sw) if sw else "—"
+            print(f"  {d.get('name','?'):30s}  {types}")
         print()
         return
 

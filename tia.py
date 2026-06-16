@@ -1522,23 +1522,45 @@ def list_hmi_connections(device_name):
     return sta.run(_tia_call, _run)
 
 
+def _tl_entries(tl):
+    entries = []
+    if hasattr(tl, "TextListEntries"):
+        for e in tl.TextListEntries:
+            entries.append({"value": str(getattr(e, "Value", None)), "text": str(getattr(e, "Text", ""))})
+    return entries
+
 def list_hmi_textlists(device_name):
     def _run():
         _sess.ensure_project()
         _, ht = _get_hmi(device_name)
         tls = []
-        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
-            if not hasattr(sw, "TextLists"):
-                continue
-            for tl in sw.TextLists:
-                entries = []
-                if hasattr(tl, "TextListEntries"):
-                    for e in tl.TextListEntries:
-                        entries.append({
-                            "value": str(getattr(e, "Value", None)),
-                            "text":  str(getattr(e, "Text", "")),
-                        })
-                tls.append({"name": tl.Name, "entries": entries, "count": len(entries)})
+        seen = set()
+        for _item_name, sw, sw_ht in _get_hmi_all_sw(device_name):
+            if sw_ht == "Unified":
+                # Unified: HmiTextLists (user) + HmiSystemTextLists (system)
+                for coll_name, is_sys in [("HmiTextLists", False), ("HmiSystemTextLists", True)]:
+                    if not hasattr(sw, coll_name):
+                        continue
+                    coll = getattr(sw, coll_name)
+                    for i in range(coll.Count):
+                        tl = coll[i]
+                        key = f"{coll_name}:{tl.Name}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        entries = _tl_entries(tl)
+                        tls.append({"name": tl.Name, "is_system": is_sys, "entries": entries, "count": len(entries)})
+            else:
+                # Advanced: TextLists (user + system gemischt)
+                if not hasattr(sw, "TextLists"):
+                    continue
+                for tl in sw.TextLists:
+                    key = f"TextLists:{tl.Name}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    entries = _tl_entries(tl)
+                    tls.append({"name": tl.Name, "entries": entries, "count": len(entries)})
         return {"device": device_name, "hmi_type": ht, "textlists": tls, "count": len(tls)}
     return sta.run(_tia_call, _run)
 
@@ -2668,23 +2690,32 @@ def export_hmi_textlists(device_name, output_path=None):
         out_dir.mkdir(parents=True, exist_ok=True)
         exported = []
         errors = []
+        seen = set()
         all_sw = _get_hmi_all_sw(device_name)
-        for _item_name, sw, _ht in all_sw:
-            if not hasattr(sw, "TextLists"):
-                continue
-            tl_coll = sw.TextLists
-            for tl in tl_coll:
-                xml_file = out_dir / f"hmi_tl_{device_name}_{tl.Name}.xml"
-                if xml_file.exists():
-                    xml_file.unlink()
-                try:
-                    tl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-                    exported.append({"name": tl.Name, "file": str(xml_file)})
-                except Exception as ex:
-                    errors.append({"name": tl.Name, "error": str(ex)})
+        for _item_name, sw, sw_ht in all_sw:
+            colls = (["HmiTextLists", "HmiSystemTextLists"] if sw_ht == "Unified"
+                     else (["TextLists"] if hasattr(sw, "TextLists") else []))
+            for coll_name in colls:
+                if not hasattr(sw, coll_name):
+                    continue
+                coll = getattr(sw, coll_name)
+                for i in range(coll.Count):
+                    tl = coll[i]
+                    key = f"{coll_name}:{tl.Name}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    xml_file = out_dir / f"hmi_tl_{device_name}_{tl.Name}.xml"
+                    if xml_file.exists():
+                        xml_file.unlink()
+                    try:
+                        tl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                        exported.append({"name": tl.Name, "file": str(xml_file)})
+                    except Exception as ex:
+                        errors.append({"name": tl.Name, "error": str(ex)})
         if not exported:
             raise TiaError("TEXTLIST_EXPORT_NOT_SUPPORTED",
-                f"Keine Textlisten exportierbar. sw_count={len(all_sw)}, errors={errors}", False)
+                f"Keine Textlisten exportierbar. errors={errors}", False)
         return {"status": "ok", "device": device_name, "hmi_type": ht,
                 "exported": exported, "count": len(exported)}
     return sta.run(_tia_call, _run)
@@ -2702,10 +2733,11 @@ def import_hmi_textlists(device_name, file_path):
         fi = FileInfo(file_path)
         if not fi.Exists:
             raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
-        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
-            if not hasattr(sw, "TextLists"):
+        for _item_name, sw, sw_ht in _get_hmi_all_sw(device_name):
+            coll_name = "HmiTextLists" if sw_ht == "Unified" else "TextLists"
+            if not hasattr(sw, coll_name):
                 continue
-            sw.TextLists.Import(fi, eng.ImportOptions.Override)
+            getattr(sw, coll_name).Import(fi, eng.ImportOptions.Override)
             return {"status": "ok", "device": device_name, "imported_from": file_path}
         raise TiaError("TEXTLIST_IMPORT_NOT_SUPPORTED",
             f"Kein Textlisten-Import für HMI '{device_name}' ({ht}) verfügbar.", False)

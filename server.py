@@ -6,7 +6,7 @@ Claude Desktop: %APPDATA%\Claude\claude_desktop_config.json
     "args":["C:/tia-mcp/server.py"], "cwd":"C:/tia-mcp" } } }
 """
 
-import json, asyncio, socket, sys, threading
+import json, asyncio, socket, sys, os, threading
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types

@@ -189,8 +189,8 @@ und Standardstrukturen anlegen (PLC, HMI Advanced/Unified, Bibliotheken).
   import_hmi_tagtable(device, file_path)        → Einzelne Tag-Tabelle importieren (Datei oder Ordner)
   export_hmi_scripts(device, path?)             → HMI-Scripts exportieren
   import_hmi_scripts(device, file_path)         → HMI-Scripts importieren
-  export_hmi_alarms(device, output_path?)       → Alarme als XML exportieren
-  import_hmi_alarms(device, file_path)          → Alarme aus XML importieren
+  export_hmi_alarms(device, output_path?)       → Alarme als JSON exportieren (alle Attribute)
+  import_hmi_alarms(device, file_path)          → Alarme aus JSON importieren (SetAttribute per Name)
   export_hmi_textlists(device, output_path?)    → Textlisten als XML exportieren
   import_hmi_textlists(device, file_path)       → Textlisten aus XML importieren
 
@@ -764,12 +764,12 @@ async def list_tools():
           {"device_name":{"type":"string"},"file_path":{"type":"string"}},
           ["device_name","file_path"]),
         T("export_hmi_alarms",
-          "HMI-Alarme als XML exportieren. Gegenstück zu import_hmi_alarms.",
+          "HMI-Alarme als JSON exportieren (alle Attribute via GetAttributeInfos). Gegenstück zu import_hmi_alarms.",
           {"device_name":{"type":"string"},
-           "output_path":{"type":"string","description":"Optional: Zieldatei"}},
+           "output_path":{"type":"string","description":"Optional: Zieldatei .json"}},
           ["device_name"]),
         T("import_hmi_alarms",
-          "HMI-Alarme aus XML importieren. Gegenstück zu export_hmi_alarms.",
+          "HMI-Alarme aus JSON importieren (SetAttribute je Alarm per Name). Gegenstück zu export_hmi_alarms.",
           {"device_name":{"type":"string"},"file_path":{"type":"string"}},
           ["device_name","file_path"]),
         T("export_hmi_textlists",

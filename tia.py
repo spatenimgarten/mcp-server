@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.12.0"
+VERSION      = "1.13.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.13.0: export/import_hmi_alarms — JSON-basiert via GetAttributeInfos (kein V21-API-Export)",
         "1.12.0: set_hmi_log — Unified DataLog-Einstellungen schreiben (Name, Segment, Settings)",
         "1.11.0: list_hmi_logs — Unified DataLogs mit Segment, Settings, Backup-Attributen",
         "1.10.0: list_hmi_connections — nicht-integrierte HMI-Verbindungen (Advanced+Unified); list_hmi_textlists Fix: sucht alle Items der Station",
@@ -1305,14 +1306,37 @@ def list_hmi_tags(device_name, table_name=None):
         return {"device":device_name,"hmi_type":ht,"tags":tags,"count":len(tags)}
     return sta.run(_tia_call, _run)
 
+def _alarm_to_dict(a, kind):
+    """Liest alle Attribute eines Alarm-Objekts via GetAttributeInfos."""
+    d = {"_alarm_type": kind}
+    try:
+        d["name"] = str(a.Name)
+    except Exception:
+        d["name"] = "?"
+    if hasattr(a, "GetAttributeInfos"):
+        try:
+            for ai in a.GetAttributeInfos():
+                n = str(ai.Name)
+                try:
+                    v = a.GetAttribute(n)
+                    d[n] = str(v) if v is not None else None
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return d
+
 def list_hmi_alarms(device_name):
     def _run():
-        _sess.ensure_project(); sw,ht = _get_hmi(device_name); alarms = []
-        for attr,kind in [("DiscreteAlarms","discrete"),("AnalogAlarms","analog"),("Alarms","unified")]:
-            if hasattr(sw,attr):
-                for a in getattr(sw,attr):
-                    alarms.append({"name":a.Name,"type":kind,"class":str(getattr(a,"AlarmClass","?"))})
-        return {"device":device_name,"hmi_type":ht,"alarms":alarms,"count":len(alarms)}
+        _sess.ensure_project(); sw, ht = _get_hmi(device_name); alarms = []
+        for attr, kind in [("DiscreteAlarms", "discrete"), ("AnalogAlarms", "analog"), ("Alarms", "unified")]:
+            if hasattr(sw, attr):
+                try:
+                    for a in getattr(sw, attr):
+                        alarms.append(_alarm_to_dict(a, kind))
+                except Exception as e:
+                    alarms.append({"_alarm_type": kind, "_error": str(e)})
+        return {"device": device_name, "hmi_type": ht, "alarms": alarms, "count": len(alarms)}
     return sta.run(_tia_call, _run)
 
 def list_hmi_cycles(device_name):
@@ -3002,64 +3026,78 @@ def import_hmi_screen(device_name, file_path):
 
 def export_hmi_alarms(device_name, output_path=None):
     """
-    HMI-Alarme als XML exportieren.
-    Gegenstück zu list_hmi_alarms / import_hmi_alarms.
-    output_path: Zieldatei (Standard: C:\\tia-mcp\\export\\hmi_alarms_<device>.xml).
+    HMI-Alarme als JSON exportieren (alle Attribute via GetAttributeInfos).
+    Kein natives API-Export in V21 — JSON ermöglicht Soll/Ist-Vergleich.
+    output_path: Zieldatei .json (Standard: C:\\tia-mcp\\export\\hmi_alarms_<device>.json).
     """
     def _run():
         _sess.ensure_project()
-        import Siemens.Engineering as eng
-        from System.IO import FileInfo
+        import json as _json
         sw, ht = _get_hmi(device_name)
         out_dir  = _export_dir(None if output_path and Path(output_path).suffix else output_path)
-        xml_file = Path(output_path) if (output_path and Path(output_path).suffix) \
-                   else out_dir / f"hmi_alarms_{device_name}.xml"
-        xml_file.parent.mkdir(parents=True, exist_ok=True)
-        if xml_file.exists(): xml_file.unlink()
-        # WinCC Advanced: DiscreteAlarms.Export / AnalogAlarms.Export
-        # WinCC Unified:  Alarms.Export
-        exported = False
-        for attr in ("DiscreteAlarms", "AnalogAlarms", "Alarms"):
-            col = getattr(sw, attr, None)
-            if col and hasattr(col, "Export"):
-                col.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-                exported = True
-                break
-        # Fallback: ganzes HMI-Objekt exportieren
-        if not exported and hasattr(sw, "Export"):
-            sw.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-            exported = True
-        if not exported:
-            raise TiaError("ALARM_EXPORT_NOT_SUPPORTED",
-                f"Kein Alarm-Export für HMI '{device_name}' ({ht}) verfügbar.", False)
+        json_file = Path(output_path) if (output_path and Path(output_path).suffix) \
+                    else out_dir / f"hmi_alarms_{device_name}.json"
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        alarms = []
+        for attr, kind in [("DiscreteAlarms", "discrete"), ("AnalogAlarms", "analog"), ("Alarms", "unified")]:
+            if hasattr(sw, attr):
+                try:
+                    for a in getattr(sw, attr):
+                        alarms.append(_alarm_to_dict(a, kind))
+                except Exception as e:
+                    pass
+        result = {"device": device_name, "hmi_type": ht, "alarms": alarms, "count": len(alarms)}
+        json_file.write_text(_json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         return {"status": "ok", "device": device_name, "hmi_type": ht,
-                "xml_path": str(xml_file)}
+                "count": len(alarms), "json_path": str(json_file)}
     return sta.run(_tia_call, _run)
+
+_ALARM_SKIP = {"_alarm_type", "name", "Name"}
 
 def import_hmi_alarms(device_name, file_path):
     """
-    HMI-Alarme aus XML importieren.
-    Gegenstück zu export_hmi_alarms.
+    HMI-Alarme aus JSON importieren (SetAttribute für jedes schreibbare Attribut).
+    Gegenstück zu export_hmi_alarms — matched per Name.
     """
     def _run():
         _sess.ensure_project()
-        import Siemens.Engineering as eng
-        from System.IO import FileInfo
+        import json as _json
         sw, ht = _get_hmi(device_name)
-        fi = FileInfo(file_path)
-        if not fi.Exists:
+        p = Path(file_path)
+        if not p.exists():
             raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
-        imported = False
-        for attr in ("DiscreteAlarms", "AnalogAlarms", "Alarms"):
-            col = getattr(sw, attr, None)
-            if col and hasattr(col, "Import"):
-                col.Import(fi, eng.ImportOptions.Override)
-                imported = True
-                break
-        if not imported:
-            raise TiaError("ALARM_IMPORT_NOT_SUPPORTED",
-                f"Kein Alarm-Import für HMI '{device_name}' ({ht}) verfügbar.", False)
-        return {"status": "ok", "device": device_name, "imported_from": file_path}
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        src_alarms = data.get("alarms", [])
+
+        # Aufbau Name→Objekt-Map
+        alarm_map = {}
+        for attr, kind in [("DiscreteAlarms", "discrete"), ("AnalogAlarms", "analog"), ("Alarms", "unified")]:
+            if hasattr(sw, attr):
+                try:
+                    for a in getattr(sw, attr):
+                        alarm_map[str(a.Name)] = (a, kind)
+                except Exception:
+                    pass
+
+        applied, skipped = [], []
+        for src in src_alarms:
+            name = src.get("name") or src.get("Name", "")
+            if name not in alarm_map:
+                skipped.append({"name": name, "reason": "not_found"})
+                continue
+            obj, _ = alarm_map[name]
+            changes = []
+            for k, v in src.items():
+                if k in _ALARM_SKIP or v is None:
+                    continue
+                try:
+                    obj.SetAttribute(k, v)
+                    changes.append(k)
+                except Exception:
+                    pass
+            applied.append({"name": name, "changes": changes})
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "applied": applied, "skipped": skipped}
     return sta.run(_tia_call, _run)
 
 def export_hmi_textlists(device_name, output_path=None):

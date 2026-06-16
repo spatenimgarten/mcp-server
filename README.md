@@ -168,10 +168,20 @@ attach_project / open_project
 | `export_hmi_tagtable` | `device_name`, `table_name`, [`output_path`] | Einzelne Tag-Tabelle exportieren |
 | `import_hmi_tagtable` | `device_name`, `file_path` | Tag-Tabelle importieren |
 | `import_hmi_tags` | `device_name`, `file_path` | Alle HMI-Tags importieren |
-| `export_hmi_alarms` | `device_name`, [`output_path`] | Alarme exportieren² |
-| `import_hmi_alarms` | `device_name`, `file_path` | Alarme importieren² |
-| `export_hmi_textlists` | `device_name`, [`output_path`] | Textlisten exportieren² |
+| `export_hmi_alarms` | `device_name`, [`output_path`] | Alarme als JSON exportieren (alle Attribute via GetAttributeInfos)⁵ |
+| `import_hmi_alarms` | `device_name`, `file_path` | Alarme aus JSON importieren (SetAttribute per Name)⁵ |
+| `export_hmi_textlists` | `device_name`, [`output_path`] | Textlisten exportieren (Advanced+Unified XML)² |
 | `import_hmi_textlists` | `device_name`, `file_path` | Textlisten importieren² |
+| `export_hmi_connections` | `device_name`, [`output_path`] | HMI-Verbindungen als JSON exportieren |
+| `import_hmi_connections` | `device_name`, `file_path` | HMI-Verbindungen aus JSON importieren |
+| `export_hmi_cycles` | `device_name`, [`output_path`] | Erfassungszyklen als XML exportieren (Advanced) |
+| `import_hmi_cycles` | `device_name`, `file_path` | Erfassungszyklen aus XML importieren |
+| `list_hmi_graphic_lists` | `device_name` | Grafiklisten auflisten |
+| `export_hmi_graphic_lists` | `device_name`, [`output_path`] | Grafiklisten exportieren (Advanced XML / Unified YAML) |
+| `import_hmi_graphic_lists` | `device_name`, `file_path` | Grafiklisten importieren |
+| `list_hmi_screen_management` | `device_name`, [`screen_type`] | Screen-Management auflisten (template/slidein/popup/global_elements/overview) |
+| `export_hmi_screen_management` | `device_name`, `screen_type`, [`output_path`] | Screen-Management-Elemente exportieren |
+| `import_hmi_screen_management` | `device_name`, `screen_type`, `file_path` | Screen-Management-Elemente importieren |
 | `export_hmi_scripts` | `device_name`, [`output_path`] | Scripts exportieren |
 | `import_hmi_scripts` | `device_name`, `file_path` | Scripts importieren |
 | `create_hmi_structure` | `device_name`, `structure` | Ordnerstruktur anlegen (experimentell) |
@@ -196,7 +206,8 @@ attach_project / open_project
 | `export_hw_config` | [`output_path`] | Hardware-Konfiguration aller Geräte als Excel (Station, Komponente, Bestellnr., Slot, IP) |
 
 ³ Advanced: direkte API. Unified: V21-Limitation — Screens in binären DB-Dateien, kein Openness-Export möglich.  
-⁴ Advanced: existierender Screen wird automatisch gelöscht, dann importiert. Unified: V21-Limitation.
+⁴ Advanced: existierender Screen wird automatisch gelöscht, dann importiert. Unified: V21-Limitation.  
+⁵ Kein natives XML-Export in V21 — JSON-Workaround liest alle Attribute via `GetAttributeInfos()`. Advanced: V21-Limit (DiscreteAlarms nicht zugänglich).
 
 ### Bibliotheken
 
@@ -226,19 +237,19 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 |---|---|:---:|:---:|---|
 | **Runtime settings** | `get/set/export_hmi_config` | ✅ | ✅ | Unified zusätzlich mit RuntimeSettings-Sheet |
 | **Screens** | `list/export/import_hmi_screen(s)` | ✅ | ⚠️ | Unified: nur list; Export/Import V21-Limit |
-| **Screen management** | — | ❌ | ❌ | V21-Limit |
+| **Screen management** | `list/export/import_hmi_screen_management` | ✅ | ✅ | Templates, Slideins, Popups, GlobalElements, Overview |
 | **HMI tags** | `list/export/import_hmi_tags` | ✅ | ✅ | |
-| **Connections** | `list_hmi_connections` | ⚠️ | ✅ | Nur nicht-integrierte; integrierte V21-Limit |
-| **HMI alarms** | `list_hmi_alarms` | ❌ | ✅ | Advanced: immer `[]` (V21-Limit) |
+| **Connections** | `list/export/import_hmi_connections` | ⚠️ | ✅ | Nur nicht-integrierte; JSON-Export; integrierte V21-Limit |
+| **HMI alarms** | `list/export/import_hmi_alarms` | ❌ | ✅ | Advanced: V21-Limit; Unified: JSON via GetAttributeInfos |
 | **Recipes** | — | ❌ | ❌ | V21-Limit |
 | **Historical data / Logs** | `list_hmi_logs`, `set_hmi_log` | ❌ | ✅ | Advanced: DataLogs nicht zugänglich |
 | **Scripts** | `export/import_hmi_scripts` | ✅ | ✅ | Advanced: VBScript · Unified: JS/YML |
 | **Scheduled tasks** | `list_hmi_scheduled_tasks` | ❌ | ❌ | V21-Limit — ScheduledTaskFolder nicht zugänglich |
-| **Cycles** | `list_hmi_cycles` | ✅ | ❌ | Advanced: Name, Periode, system-Flag · Unified: V21-Limit |
+| **Cycles** | `list/export/import_hmi_cycles` | ✅ | ❌ | Advanced: Name, Periode, XML-Export · Unified: V21-Limit |
 | **Reporting / Reports** | — | ❌ | ❌ | V21-Limit |
 | **Parameter set types** | — | — | ❌ | V21-Limit Unified |
 | **Collaboration data** | — | — | ❌ | V21-Limit Unified |
-| **Text and graphic lists** | `list/export/import_hmi_textlists` | ✅ | ⚠️ | Unified: list ✅ (user+system), export/import nur user-Listen |
+| **Text and graphic lists** | `list/export/import_hmi_textlists`, `list/export/import_hmi_graphic_lists` | ✅ | ⚠️ | Unified TextLists: list ✅, export/import user-Listen; Graphic lists: Advanced XML, Unified YAML |
 | **User administration** | — | ❌ | ❌ | V21-Limit |
 
 > ❌-Bereiche sind Einschränkungen der TIA Portal Openness API V21, nicht des MCP-Servers.
@@ -285,11 +296,22 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ skalare Attribute |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel |
 | Verbindungen auflisten | `list_hmi_connections` | ⚠️ nur nicht-integrierte |
+| Verbindungen exportieren | `export_hmi_connections` | ✅ JSON |
+| Verbindungen importieren | `import_hmi_connections` | ✅ JSON (SetAttribute) |
 | Erfassungszyklen auflisten | `list_hmi_cycles` | ✅ Name, Periode, system-Flag |
+| Erfassungszyklen exportieren | `export_hmi_cycles` | ✅ XML |
+| Erfassungszyklen importieren | `import_hmi_cycles` | ✅ XML |
 | Textlisten auflisten | `list_hmi_textlists` | ✅ |
 | Textlisten exportieren | `export_hmi_textlists` | ✅ XML |
 | Textlisten importieren | `import_hmi_textlists` | ✅ XML (Override) |
+| Grafiklisten auflisten | `list_hmi_graphic_lists` | ✅ |
+| Grafiklisten exportieren | `export_hmi_graphic_lists` | ✅ XML |
+| Grafiklisten importieren | `import_hmi_graphic_lists` | ✅ XML |
+| Screen-Management auflisten | `list_hmi_screen_management` | ✅ template/slidein/popup/global/overview |
+| Screen-Management exportieren | `export_hmi_screen_management` | ✅ XML |
+| Screen-Management importieren | `import_hmi_screen_management` | ✅ XML |
 | Alarme auflisten | `list_hmi_alarms` | ❌ V21-Limit |
+| Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
 | Datenlogs | `list_hmi_logs` | ❌ V21-Limit |
 | Geplante Tasks | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
 | Rezepte | — | ❌ V21-Limit |
@@ -305,18 +327,30 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 | Tags auflisten | `list_hmi_tags` | ✅ |
 | Tags exportieren | `export_hmi_tags`, `export_hmi_tagtable` | ✅ |
 | Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
-| Alarme auflisten | `list_hmi_alarms` | ✅ |
+| Alarme auflisten | `list_hmi_alarms` | ✅ alle Attribute |
+| Alarme exportieren | `export_hmi_alarms` | ✅ JSON (GetAttributeInfos) |
+| Alarme importieren | `import_hmi_alarms` | ✅ JSON (SetAttribute per Name) |
+| Verbindungen auflisten | `list_hmi_connections` | ✅ |
+| Verbindungen exportieren | `export_hmi_connections` | ✅ JSON |
+| Verbindungen importieren | `import_hmi_connections` | ✅ JSON |
+| Grafiklisten auflisten | `list_hmi_graphic_lists` | ✅ |
+| Grafiklisten exportieren | `export_hmi_graphic_lists` | ✅ YAML |
+| Grafiklisten importieren | `import_hmi_graphic_lists` | ✅ YAML |
+| Screen-Management auflisten | `list_hmi_screen_management` | ✅ template/slidein/popup/global/overview |
+| Screen-Management exportieren | `export_hmi_screen_management` | ✅ |
+| Screen-Management importieren | `import_hmi_screen_management` | ✅ |
 | Scripts exportieren | `export_hmi_scripts` | ✅ JS/YML |
 | Scripts importieren | `import_hmi_scripts` | ✅ |
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, 2 Sheets |
-| Verbindungen auflisten | `list_hmi_connections` | ✅ |
 | Datenlogs auslesen | `list_hmi_logs` | ✅ Segment, Settings, Backup |
 | Datenlog schreiben | `set_hmi_log` | ✅ Name, Segmentgröße, Speicher |
 | Erfassungszyklen auflisten | `list_hmi_cycles` | ❌ V21-Limit |
 | Geplante Tasks | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
-| Textlisten | `list_hmi_textlists` | ❌ V21-Limit |
+| Textlisten auflisten | `list_hmi_textlists` | ✅ user + system |
+| Textlisten exportieren | `export_hmi_textlists` | ✅ XML (user-Listen) |
+| Textlisten importieren | `import_hmi_textlists` | ✅ XML |
 | Tags anlegen / löschen | — | ❌ fehlt |
 
 ### Bibliotheken
@@ -352,7 +386,7 @@ Tools die noch nicht implementiert sind, nach Priorität:
 | 🟡 NIEDRIG | `use_library_type` | Bibliothek | Typ in Projekt instanziieren |
 | 🟡 NIEDRIG | `get_cross_references` | PLC/HMI | Querverweise zwischen Tags und Bausteinen |
 
-> V21-Limitationen (Alarme, Textlisten, Unified Screens, Rezepte) können nicht durch neue Tools umgangen werden — das ist eine Einschränkung der TIA Openness API selbst, nicht des MCP-Servers.
+> V21-Limitationen (Advanced-Alarme, Unified Screens, Rezepte, Scheduled Tasks) können nicht durch neue Tools umgangen werden — das ist eine Einschränkung der TIA Openness API selbst, nicht des MCP-Servers. Unified-Alarme werden als JSON-Workaround über `GetAttributeInfos` exportiert.
 
 ---
 
@@ -404,6 +438,8 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.13.0 | 2026-06-16 | `export/import_hmi_alarms` — JSON-basiert via GetAttributeInfos (kein V21-API-Export); `list_hmi_alarms` erweitert (alle Attribute) |
+| 1.12.x | 2026-06-16 | `export/import_hmi_connections` JSON; `export/import_hmi_cycles` XML; `list/export/import_hmi_graphic_lists`; `list/export/import_hmi_screen_management` (template/slidein/popup/global/overview) |
 | 1.12.0 | 2026-06-16 | `set_hmi_log` — Unified DataLog-Einstellungen schreiben (Name, Segment, Storage) |
 | 1.11.0 | 2026-06-16 | `list_hmi_logs` — Unified DataLogs mit Segment, Settings, Backup |
 | 1.10.0 | 2026-06-16 | `list_hmi_connections` — nicht-integrierte HMI-Verbindungen; `list_hmi_textlists` Fix (sucht alle Items) |

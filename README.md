@@ -127,6 +127,9 @@ attach_project / open_project
 | `import_plc_block` | `device_name`, `file_path` | Baustein aus XML importieren |
 | `export_plc_tagtable` | `device_name`, `table_name` | PLC-Tag-Tabelle exportieren |
 | `import_plc_tagtable` | `device_name`, `file_path` | PLC-Tag-Tabelle importieren |
+| `get_plc_config` | `device_name` | Alle CPU-Attribute auslesen (Zyklus, Startup, Netzwerk, OPC UA …) |
+| `set_plc_config` | `device_name`, `settings` | CPU-Attribute schreiben (schreibgeschützte werden übersprungen) |
+| `export_plc_config` | `device_name`, [`output_path`] | CPU-Konfiguration als Excel exportieren, gruppiert nach Kategorien |
 
 ¹ Nur einfache SCL-Anweisungen ohne Keywords/Kommentare. Für komplexen SCL: Export → XML bearbeiten → Import.
 
@@ -159,6 +162,12 @@ attach_project / open_project
 | `export_hmi_scripts` | `device_name`, [`output_path`] | Scripts exportieren |
 | `import_hmi_scripts` | `device_name`, `file_path` | Scripts importieren |
 | `create_hmi_structure` | `device_name`, `structure` | Ordnerstruktur anlegen (experimentell) |
+
+### Hardware & Projekt
+
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `export_hw_config` | [`output_path`] | Hardware-Konfiguration aller Geräte als Excel (Station, Komponente, Bestellnr., Slot, IP) |
 
 ³ Advanced: direkte API. Unified: V21-Limitation — Screens in binären DB-Dateien, kein Openness-Export möglich.  
 ⁴ Advanced: existierender Screen wird automatisch gelöscht, dann importiert. Unified: V21-Limitation.
@@ -225,6 +234,9 @@ Basierend auf der WinCC-Projektstruktur:
 | Kompilieren | `compile_plc` | ✅ |
 | Tag-Tabellen exportieren | `export_plc_tagtable` | ✅ |
 | Tag-Tabellen importieren | `import_plc_tagtable` | ✅ |
+| CPU-Konfiguration lesen | `get_plc_config` | ✅ alle DeviceItem-Attribute |
+| CPU-Konfiguration schreiben | `set_plc_config` | ✅ skalare Attribute |
+| CPU-Konfiguration exportieren | `export_plc_config` | ✅ Excel, gruppiert |
 | DB-Inhalte lesen | — | ❌ fehlt |
 | Bausteine löschen | — | ❌ fehlt |
 
@@ -350,6 +362,9 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.7.0 | 2026-06-16 | `get_plc_config`, `set_plc_config`, `export_plc_config` — CPU-Konfigurationsattribute lesen, schreiben und als Excel exportieren |
+| 1.6.0 | 2026-06-16 | `get_hmi_runtime_settings`, `set_hmi_runtime_settings`, `export_hmi_runtime_settings` — WinCC Unified Runtime-Einstellungen |
+| 1.5.0 | 2026-06-16 | `export_hw_config` — Hardware-Konfiguration aller Geräte als Excel exportieren |
 | 1.4.0 | 2026-06-16 | Primär/Proxy-Architektur: mehrere Sessions teilen eine TIA-Verbindung; `restart_server`-Tool; BUG-15 Fix list_plc_tags comment-Feld |
 | 1.3.0 | 2026-06-15 | `list_plc_blocks`, `list_plc_tag_tables`, `list_plc_tags`, `list_plc_udts` — PLC vollständig lesbar |
 | 1.2.0 | 2026-06-14 | BUG-11–14 gefixt: rekursive Screen-Suche, Unified-Typ-Erkennung, HmiTarget-API-Support, import_hmi_screen mit XML-basiertem Delete-vor-Import |

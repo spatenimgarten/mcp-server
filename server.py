@@ -570,10 +570,20 @@ async def list_tools():
            "settings":    {"type": "object", "description": "z.B. {\"LogMaxSize\": \"2000\", \"StorageFolder\": \"/logs\"}"}},
           ["device_name", "log_name", "settings"]),
         T("list_hmi_connections",
-          "HMI-Verbindungen auflisten (Advanced und Unified). "
-          "Liefert Name, Kommunikationstreiber, Partner-PLC, Station, Node und IP-Adresse. "
-          "Hinweis: Integrierte Verbindungen (TIA-Netzwerktopologie) sind in V21 nicht zugänglich.",
+          "HMI-Verbindungen auflisten inkl. DriverProperties (IP-Adressen etc.). "
+          "Hinweis: Integrierte Verbindungen sind in V21 nicht zugänglich.",
           {"device_name":{"type":"string"}}, ["device_name"]),
+        T("export_hmi_connections",
+          "HMI-Verbindungen als JSON exportieren (alle Attribute + DriverProperties). "
+          "Gegenstück zu import_hmi_connections.",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zieldatei (.json)"}},
+          ["device_name"]),
+        T("import_hmi_connections",
+          "HMI-Verbindungen aus JSON importieren. Schreibbare Felder (Name, IP, Treiber …) "
+          "werden gesetzt, Read-only-Felder (Node, Partner, Station) übersprungen.",
+          {"device_name":{"type":"string"}, "file_path":{"type":"string"}},
+          ["device_name","file_path"]),
         T("list_hmi_textlists", "Textlisten eines HMI (Advanced und Unified).",
           {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_cycles",
@@ -836,7 +846,9 @@ def _dispatch(name, a):
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])
         case "list_hmi_logs":              return tia.list_hmi_logs(a["device_name"])
         case "set_hmi_log":                return tia.set_hmi_log(a["device_name"], a["log_name"], a["settings"])
-        case "list_hmi_connections":       return tia.list_hmi_connections(a["device_name"])
+        case "list_hmi_connections":        return tia.list_hmi_connections(a["device_name"])
+        case "export_hmi_connections":      return tia.export_hmi_connections(a["device_name"],a.get("output_path"))
+        case "import_hmi_connections":      return tia.import_hmi_connections(a["device_name"],a["file_path"])
         case "list_hmi_textlists":         return tia.list_hmi_textlists(a["device_name"])
         case "list_hmi_cycles":            return tia.list_hmi_cycles(a["device_name"])
         case "list_hmi_scheduled_tasks":   return tia.list_hmi_scheduled_tasks(a["device_name"])

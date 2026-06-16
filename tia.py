@@ -1498,6 +1498,22 @@ def set_hmi_log(device_name, log_name, settings: dict):
     return sta.run(_tia_call, _run)
 
 
+def _conn_to_dict(c, item_name):
+    """Connection-Objekt in serialisierbares Dict umwandeln (inkl. DriverProperties)."""
+    entry = {"item": item_name}
+    for ai in c.GetAttributeInfos():
+        n = str(ai.Name)
+        v = c.GetAttribute(n)
+        entry[n] = str(v) if v is not None else None
+    dp = getattr(c, "DriverProperties", None)
+    if dp is not None:
+        driver_props = {}
+        for i in range(dp.Count):
+            prop = dp[i]
+            driver_props[str(prop.PropertyName)] = str(prop.Value)
+        entry["DriverProperties"] = driver_props
+    return entry
+
 def list_hmi_connections(device_name):
     def _run():
         _sess.ensure_project()
@@ -1507,18 +1523,84 @@ def list_hmi_connections(device_name):
             if not hasattr(sw, "Connections"):
                 continue
             for c in sw.Connections:
-                entry = {"item": _item_name}
-                for ai in c.GetAttributeInfos():
-                    n = str(ai.Name)
-                    v = c.GetAttribute(n)
-                    entry[n] = str(v) if v is not None else None
-                conns.append(entry)
+                conns.append(_conn_to_dict(c, _item_name))
         note = None
         if not conns:
             note = "Keine Verbindungen gefunden. Integrierte Verbindungen sind über die Openness API nicht zugänglich (V21-Limitation)."
         return {"status": "ok", "device": device_name, "hmi_type": ht,
                 "connections": conns, "count": len(conns),
                 **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
+
+_CONN_RW = {"Name", "Comment", "CommunicationDriver", "DisabledAtStartup", "InitialAddress"}
+
+def export_hmi_connections(device_name, output_path=None):
+    """Verbindungen als JSON exportieren (inkl. DriverProperties)."""
+    def _run():
+        _sess.ensure_project()
+        import json as _json
+        _, ht = _get_hmi(device_name)
+        conns = []
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "Connections"):
+                continue
+            for c in sw.Connections:
+                conns.append(_conn_to_dict(c, _item_name))
+        out_dir = _export_dir(None if not output_path or not Path(output_path).suffix else output_path)
+        json_file = (Path(output_path) if output_path and Path(output_path).suffix
+                     else out_dir / f"hmi_connections_{device_name}.json")
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        json_file.write_text(_json.dumps(conns, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "count": len(conns), "json_path": str(json_file)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_connections(device_name, file_path):
+    """
+    Verbindungs-Attribute aus JSON importieren (schreibbare Felder + DriverProperties).
+    Abgleich über Verbindungsname — unbekannte Verbindungen werden übersprungen.
+    """
+    def _run():
+        _sess.ensure_project()
+        import json as _json
+        _, ht = _get_hmi(device_name)
+        data = _json.loads(Path(file_path).read_text(encoding="utf-8"))
+        applied = []
+        skipped = []
+        for entry in data:
+            conn_name = entry.get("Name")
+            if not conn_name:
+                continue
+            found = False
+            for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+                if not hasattr(sw, "Connections"):
+                    continue
+                c = sw.Connections.Find(conn_name)
+                if c is None:
+                    continue
+                found = True
+                changes = []
+                for key, val in entry.items():
+                    if key in ("item", "DriverProperties", "Node", "Partner", "Station"):
+                        continue
+                    if key in _CONN_RW:
+                        c.SetAttribute(key, val)
+                        changes.append(key)
+                dp_data = entry.get("DriverProperties", {})
+                dp = getattr(c, "DriverProperties", None)
+                if dp and dp_data:
+                    for i in range(dp.Count):
+                        prop = dp[i]
+                        pname = str(prop.PropertyName)
+                        if pname in dp_data:
+                            prop.Value = dp_data[pname]
+                            changes.append(f"DP:{pname}")
+                applied.append({"name": conn_name, "changes": changes})
+                break
+            if not found:
+                skipped.append(conn_name)
+        return {"status": "ok", "device": device_name,
+                "applied": applied, "skipped": skipped}
     return sta.run(_tia_call, _run)
 
 

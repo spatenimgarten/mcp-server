@@ -238,7 +238,7 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 | **Reporting / Reports** | — | ❌ | ❌ | V21-Limit |
 | **Parameter set types** | — | — | ❌ | V21-Limit Unified |
 | **Collaboration data** | — | — | ❌ | V21-Limit Unified |
-| **Text and graphic lists** | `list/export/import_hmi_textlists` | ✅ | ❌ | Unified: TextLists V21-Limit |
+| **Text and graphic lists** | `list/export/import_hmi_textlists` | ✅ | ⚠️ | Unified: list ✅ (user+system), export/import nur user-Listen |
 | **User administration** | — | ❌ | ❌ | V21-Limit |
 
 > ❌-Bereiche sind Einschränkungen der TIA Portal Openness API V21, nicht des MCP-Servers.

@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.11.0"
+VERSION      = "1.12.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.12.0: set_hmi_log — Unified DataLog-Einstellungen schreiben (Name, Segment, Settings)",
         "1.11.0: list_hmi_logs — Unified DataLogs mit Segment, Settings, Backup-Attributen",
         "1.10.0: list_hmi_connections — nicht-integrierte HMI-Verbindungen (Advanced+Unified); list_hmi_textlists Fix: sucht alle Items der Station",
         "1.9.1: list_hmi_cycles — Periode/Einheit aus Name geparst wenn kein Attribut; GetAttributeInfos für alle Cycle-Attribute",
@@ -1437,6 +1438,63 @@ def list_hmi_logs(device_name):
         return {"status": "ok", "device": device_name, "hmi_type": ht,
                 "logs": logs, "count": len(logs),
                 **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
+
+
+# Schreibbare Felder je Ebene (aus AccessMode-Analyse)
+_LOG_DIRECT_RW   = {"Name"}
+_LOG_SEGMENT_RW  = {"SegmentMaxSize", "SegmentStartTime"}
+_LOG_SETTINGS_RW = {"LogMaxSize", "StorageDevice", "StorageFolder"}
+
+
+def set_hmi_log(device_name, log_name, settings: dict):
+    def _run():
+        _sess.ensure_project()
+        _, ht = _get_hmi(device_name)
+        target_log = None
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "DataLogs"):
+                continue
+            for log in sw.DataLogs:
+                if str(log.Name) == log_name:
+                    target_log = log
+                    break
+            if target_log:
+                break
+        if target_log is None:
+            available = []
+            for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+                if hasattr(sw, "DataLogs"):
+                    available += [str(l.Name) for l in sw.DataLogs]
+            raise TiaError("LOG_NOT_FOUND",
+                           f"DataLog '{log_name}' nicht gefunden.",
+                           True, {"available": available})
+
+        applied, skipped_readonly, skipped_unknown = [], [], []
+        seg = target_log.GetAttribute("Segment")
+        stg = target_log.GetAttribute("Settings")
+
+        for key, val in settings.items():
+            if key in _LOG_DIRECT_RW:
+                target_log.SetAttribute(key, val)
+                applied.append(key)
+            elif key in _LOG_SEGMENT_RW:
+                seg.SetAttribute(key, val)
+                applied.append(key)
+            elif key in _LOG_SETTINGS_RW:
+                stg.SetAttribute(key, val)
+                applied.append(key)
+            elif key in {"SegmentTimePeriod", "LogTimePeriod", "Backup", "Segment", "Settings"}:
+                skipped_readonly.append(key)
+            else:
+                skipped_unknown.append(key)
+
+        return {
+            "status": "ok", "device": device_name, "hmi_type": ht, "log": log_name,
+            "applied": applied,
+            **({"skipped_readonly": skipped_readonly} if skipped_readonly else {}),
+            **({"skipped_unknown":  skipped_unknown}  if skipped_unknown  else {}),
+        }
     return sta.run(_tia_call, _run)
 
 

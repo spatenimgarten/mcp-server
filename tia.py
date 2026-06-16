@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.9.3"
+VERSION      = "1.10.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.10.0: list_hmi_connections — nicht-integrierte HMI-Verbindungen (Advanced+Unified); list_hmi_textlists Fix: sucht alle Items der Station",
         "1.9.1: list_hmi_cycles — Periode/Einheit aus Name geparst wenn kein Attribut; GetAttributeInfos für alle Cycle-Attribute",
         "1.9.0: list_hmi_cycles + list_hmi_scheduled_tasks — Erfassungszyklen und geplante Tasks (Advanced/Unified)",
         "1.8.0: get/set/export_hmi_config — HMI-DeviceItem-Attribute für Advanced UND Unified, Unified mit RuntimeSettings-Sheet",
@@ -1376,15 +1377,67 @@ def list_hmi_scheduled_tasks(device_name):
     return sta.run(_tia_call, _run)
 
 
+def _get_hmi_all_sw(station_name):
+    """Gibt alle Software-Objekte einer HMI-Station zurück: [(item_name, sw, hmi_type)]."""
+    import Siemens.Engineering as eng
+    sw_type = _get_sw_container_type()
+    result = []
+    for device in _iter_all_devices(_sess.project):
+        if device.Name != station_name:
+            continue
+        for item in device.DeviceItems:
+            sw = _try_get_software(item, "", sw_type, eng)
+            if sw is None:
+                continue
+            full = type(sw).__module__ + "." + type(sw).__name__
+            ht = "Unified" if "HmiUnified" in full else ("Advanced" if "Hmi" in full else None)
+            if ht:
+                result.append((item.Name, sw, ht))
+    return result
+
+
+def list_hmi_connections(device_name):
+    def _run():
+        _sess.ensure_project()
+        _, ht = _get_hmi(device_name)
+        conns = []
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "Connections"):
+                continue
+            for c in sw.Connections:
+                entry = {"item": _item_name}
+                for ai in c.GetAttributeInfos():
+                    n = str(ai.Name)
+                    v = c.GetAttribute(n)
+                    entry[n] = str(v) if v is not None else None
+                conns.append(entry)
+        note = None
+        if not conns:
+            note = "Keine Verbindungen gefunden. Integrierte Verbindungen sind über die Openness API nicht zugänglich (V21-Limitation)."
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "connections": conns, "count": len(conns),
+                **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
+
+
 def list_hmi_textlists(device_name):
     def _run():
-        _sess.ensure_project(); sw,ht = _get_hmi(device_name); tls = []
-        if hasattr(sw,"TextLists"):
+        _sess.ensure_project()
+        _, ht = _get_hmi(device_name)
+        tls = []
+        for _item_name, sw, _ht in _get_hmi_all_sw(device_name):
+            if not hasattr(sw, "TextLists"):
+                continue
             for tl in sw.TextLists:
-                entries = [{"value":getattr(e,"Value",None),"text":str(getattr(e,"Text",""))}
-                           for e in (tl.TextListEntries if hasattr(tl,"TextListEntries") else [])]
-                tls.append({"name":tl.Name,"entries":entries})
-        return {"device":device_name,"hmi_type":ht,"textlists":tls,"count":len(tls)}
+                entries = []
+                if hasattr(tl, "TextListEntries"):
+                    for e in tl.TextListEntries:
+                        entries.append({
+                            "value": str(getattr(e, "Value", None)),
+                            "text":  str(getattr(e, "Text", "")),
+                        })
+                tls.append({"name": tl.Name, "entries": entries, "count": len(entries)})
+        return {"device": device_name, "hmi_type": ht, "textlists": tls, "count": len(tls)}
     return sta.run(_tia_call, _run)
 
 def _unified_screen_files(project_path):

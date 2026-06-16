@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.9.0"
+VERSION      = "1.10.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -557,7 +557,12 @@ async def list_tools():
           {"device_name":{"type":"string"},"table_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_alarms",    "Alarme eines HMI.",
           {"device_name":{"type":"string"}}, ["device_name"]),
-        T("list_hmi_textlists", "Textlisten eines HMI.",
+        T("list_hmi_connections",
+          "HMI-Verbindungen auflisten (Advanced und Unified). "
+          "Liefert Name, Kommunikationstreiber, Partner-PLC, Station, Node und IP-Adresse. "
+          "Hinweis: Integrierte Verbindungen (TIA-Netzwerktopologie) sind in V21 nicht zugänglich.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+        T("list_hmi_textlists", "Textlisten eines HMI (Advanced und Unified).",
           {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_cycles",
           "Erfassungszyklen eines HMI auflisten (z.B. 100ms, 1s, 10s). "
@@ -817,6 +822,7 @@ def _dispatch(name, a):
         case "list_hmi_screens":           return tia.list_hmi_screens(a["device_name"])
         case "list_hmi_tags":              return tia.list_hmi_tags(a["device_name"],a.get("table_name"))
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])
+        case "list_hmi_connections":       return tia.list_hmi_connections(a["device_name"])
         case "list_hmi_textlists":         return tia.list_hmi_textlists(a["device_name"])
         case "list_hmi_cycles":            return tia.list_hmi_cycles(a["device_name"])
         case "list_hmi_scheduled_tasks":   return tia.list_hmi_scheduled_tasks(a["device_name"])

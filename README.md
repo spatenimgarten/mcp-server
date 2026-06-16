@@ -140,6 +140,8 @@ attach_project / open_project
 | `list_hmi_screens` | `device_name` | Alle Screens (Advanced + Unified) |
 | `list_hmi_tags` | `device_name`, [`table_name`] | HMI-Tags (optional gefiltert) |
 | `list_hmi_alarms` | `device_name` | Alarme (Unified: discrete + analog) |
+| `list_hmi_cycles` | `device_name` | Erfassungszyklen (Name, Periode, Einheit) |
+| `list_hmi_scheduled_tasks` | `device_name` | Geplante Tasks (Trigger, Intervall, Funktion) |
 | `list_hmi_textlists` | `device_name` | Textlisten² |
 
 ² V21-Limitation: `TextLists`-Attribut nicht verfügbar — gibt immer `count:0` zurück.
@@ -266,6 +268,8 @@ Basierend auf der WinCC-Projektstruktur:
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem-Attribute (IP, Display, Runtime …) |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ skalare Attribute |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, gruppiert |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | 🔄 zu testen |
+| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | 🔄 zu testen |
 | Alarme auflisten | `list_hmi_alarms` | ⚠️ V21: immer `[]` |
 | Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
 | Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
@@ -291,6 +295,8 @@ Basierend auf der WinCC-Projektstruktur:
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, 2 Sheets |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | 🔄 zu testen |
+| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | 🔄 zu testen |
 | Tags anlegen / löschen | — | ❌ fehlt |
 | Connections lesen | — | ❌ fehlt |
 
@@ -379,6 +385,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.9.0 | 2026-06-16 | `list_hmi_cycles`, `list_hmi_scheduled_tasks` — Erfassungszyklen und geplante Tasks (Advanced + Unified) |
 | 1.8.0 | 2026-06-16 | `get_hmi_config`, `set_hmi_config`, `export_hmi_config` — HMI-DeviceItem-Attribute für Advanced und Unified; Unified-Excel mit RuntimeSettings-Sheet |
 | 1.7.0 | 2026-06-16 | `get_plc_config`, `set_plc_config`, `export_plc_config` — CPU-Konfigurationsattribute lesen, schreiben und als Excel exportieren |
 | 1.6.0 | 2026-06-16 | `get_hmi_runtime_settings`, `set_hmi_runtime_settings`, `export_hmi_runtime_settings` — WinCC Unified Runtime-Einstellungen |

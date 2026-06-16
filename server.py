@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.8.0"
+VERSION      = "1.9.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -559,6 +559,16 @@ async def list_tools():
           {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_textlists", "Textlisten eines HMI.",
           {"device_name":{"type":"string"}}, ["device_name"]),
+        T("list_hmi_cycles",
+          "Erfassungszyklen eines HMI auflisten (z.B. 100ms, 1s, 10s). "
+          "Advanced: sw.CycleFolder.Cycles. Unified: sw.Cycles. "
+          "Gibt Name, Periode, Einheit und Kommentar zurück.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+        T("list_hmi_scheduled_tasks",
+          "Geplante Tasks eines HMI auflisten (zeitgesteuerte Funktionsaufrufe). "
+          "Advanced: sw.ScheduledTaskFolder.ScheduledTasks. "
+          "Gibt Name, Trigger-Typ, Intervall, Funktionsname und Aktivierungsstatus zurück.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
         T("export_hmi_screen",  "Einzelnen HMI-Screen als XML exportieren.",
           {"device_name":{"type":"string"},"screen_name":{"type":"string"},
            "output_path":{"type":"string"}}, ["device_name","screen_name","output_path"]),
@@ -808,6 +818,8 @@ def _dispatch(name, a):
         case "list_hmi_tags":              return tia.list_hmi_tags(a["device_name"],a.get("table_name"))
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])
         case "list_hmi_textlists":         return tia.list_hmi_textlists(a["device_name"])
+        case "list_hmi_cycles":            return tia.list_hmi_cycles(a["device_name"])
+        case "list_hmi_scheduled_tasks":   return tia.list_hmi_scheduled_tasks(a["device_name"])
         case "export_hmi_screen":          return tia.export_hmi_screen(a["device_name"],a["screen_name"],a["output_path"])
         case "export_hmi_screens_all":     return tia.export_hmi_screens_all(a["device_name"],a.get("output_path"))
         case "export_hmi_scripts":         return tia.export_hmi_scripts(a["device_name"],a.get("output_path"))

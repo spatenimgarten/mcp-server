@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.8.0"
+VERSION      = "1.9.0"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.9.0: list_hmi_cycles + list_hmi_scheduled_tasks — Erfassungszyklen und geplante Tasks (Advanced/Unified)",
         "1.8.0: get/set/export_hmi_config — HMI-DeviceItem-Attribute für Advanced UND Unified, Unified mit RuntimeSettings-Sheet",
         "1.7.0: get/set/export_plc_config — SPS-DeviceItem-Attribute lesen, schreiben, als Excel exportieren",
         "1.6.0: get/set/export_hmi_runtime_settings — Unified Runtime-Einstellungen lesen, schreiben, exportieren",
@@ -1309,6 +1310,56 @@ def list_hmi_alarms(device_name):
                     alarms.append({"name":a.Name,"type":kind,"class":str(getattr(a,"AlarmClass","?"))})
         return {"device":device_name,"hmi_type":ht,"alarms":alarms,"count":len(alarms)}
     return sta.run(_tia_call, _run)
+
+def list_hmi_cycles(device_name):
+    def _run():
+        _sess.ensure_project(); sw, ht = _get_hmi(device_name)
+        cycles = []
+        # Advanced: sw.CycleFolder.Cycles  |  Unified: sw.Cycles (direkt)
+        src = None
+        if hasattr(sw, "CycleFolder") and hasattr(sw.CycleFolder, "Cycles"):
+            src = sw.CycleFolder.Cycles
+        elif hasattr(sw, "Cycles"):
+            src = sw.Cycles
+        if src is not None:
+            for c in src:
+                cycles.append({
+                    "name":   str(c.Name),
+                    "period": str(getattr(c, "Period", None)),
+                    "unit":   str(getattr(c, "PeriodUnit", getattr(c, "Unit", "?"))),
+                    "comment": str(getattr(c, "Comment", "") or ""),
+                })
+        note = None if src is not None else "CycleFolder/Cycles nicht verfügbar (V21-Limitation oder Unified)"
+        return {"device": device_name, "hmi_type": ht, "cycles": cycles,
+                "count": len(cycles), **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
+
+
+def list_hmi_scheduled_tasks(device_name):
+    def _run():
+        _sess.ensure_project(); sw, ht = _get_hmi(device_name)
+        tasks = []
+        # Advanced: sw.ScheduledTaskFolder.ScheduledTasks
+        src = None
+        if hasattr(sw, "ScheduledTaskFolder") and hasattr(sw.ScheduledTaskFolder, "ScheduledTasks"):
+            src = sw.ScheduledTaskFolder.ScheduledTasks
+        elif hasattr(sw, "ScheduledTasks"):
+            src = sw.ScheduledTasks
+        if src is not None:
+            for t in src:
+                tasks.append({
+                    "name":     str(t.Name),
+                    "trigger":  str(getattr(t, "Trigger",  getattr(t, "TriggerType", "?"))),
+                    "interval": str(getattr(t, "Interval", getattr(t, "Period",      "?"))),
+                    "function": str(getattr(t, "FunctionName", getattr(t, "Script", "?"))),
+                    "enabled":  str(getattr(t, "Enabled", "?")),
+                    "comment":  str(getattr(t, "Comment", "") or ""),
+                })
+        note = None if src is not None else "ScheduledTaskFolder nicht verfügbar (V21-Limitation oder Unified)"
+        return {"device": device_name, "hmi_type": ht, "scheduled_tasks": tasks,
+                "count": len(tasks), **({"note": note} if note else {})}
+    return sta.run(_tia_call, _run)
+
 
 def list_hmi_textlists(device_name):
     def _run():

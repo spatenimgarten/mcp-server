@@ -1,7 +1,7 @@
 # TIA Portal MCP Server — Validierungs-Checkliste
 
 `server.py · tia.py  —  TIA Portal V21 Openness`  
-47 registrierte MCP-Tools.
+49 registrierte MCP-Tools.
 
 **Zweck:** Vor jedem Release / Commit prüfen ob alle MCP-Tools korrekt reagieren.  
 **Testprojekt Advanced:** `F:\02_Projekte\AI\Projekt2\Projekt2.ap21` · PLC: `PLC_1` · HMI: `HMI_Station_1`, `HMI_Station_2`  
@@ -102,6 +102,20 @@
 | 6.3 | `list_hmi_tags` | `device_name=<HMI>, table_name="MCP_Tags"` | ✅ | ✅ | Filterung korrekt für beide Typen. |
 | 6.4 | `list_hmi_alarms` | `device_name=<HMI>` | ✅ | ✅ | [Adv] `count:0` — kein Alarm-API in V21 (kein Bug). [Uni] `count:1` (MCP_Alarm_Test, discrete). |
 | 6.5 | `list_hmi_textlists` | `device_name=<HMI>` | ✅ | ✅ | Beide `count:0` — `TextLists`-Attribut in V21 nicht verfügbar (V21-Limitation). |
+
+---
+
+## 6b — HMI: Zyklen & geplante Tasks — v1.9.0
+
+> Neue Tools — noch nicht gegen Testprojekt validiert.  
+> Advanced: `CycleFolder.Cycles` / `ScheduledTaskFolder.ScheduledTasks`.  
+> Unified: `sw.Cycles` / `sw.ScheduledTasks` (falls vorhanden) — bei V21-Limitation erscheint `note`-Feld.
+
+| # | Tool | Parameter | Advanced | Unified | Notiz |
+|---|---|---|:---:|:---:|---|
+| 6b.1 | `list_hmi_cycles` | `device_name=<HMI>` | 🔄 | 🔄 | Erwartet: Liste mit Name, Periode, Einheit. Bei V21-Limit: `note`-Feld + `count:0`. |
+| 6b.2 | `list_hmi_scheduled_tasks` | `device_name=<HMI>` | 🔄 | 🔄 | Erwartet: Liste mit Name, Trigger, Intervall, Funktion, Enabled. |
+| 6b.3 | `list_hmi_cycles` | `device_name="GIBT_ES_NICHT"` | 🔄 | — | Erwartet: `HMI_NOT_FOUND, recoverable:true`. |
 
 ---
 
@@ -313,5 +327,6 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | V1.2 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.5–1.6: `export_hw_config`, `get/set/export_hmi_runtime_settings`. TESTING.md: Abschnitte 5c, 7b (HMI-Konfiguration) angelegt. |
 | V1.3 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.7.0: `get/set/export_plc_config`. Abschnitt 5b in TESTING.md ergänzt. |
 | V1.4 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.8.0: `get/set/export_hmi_config` mit Advanced/Unified-Weiche. Abschnitt 7b um neue Tools erweitert. Tool-Zähler auf 47. |
+| V1.5 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.9.0: `list_hmi_cycles`, `list_hmi_scheduled_tasks`. Abschnitt 6b angelegt. Tool-Zähler auf 49. |
 
 | V0.6 | 2026-06-13 | Claude Sonnet 4.6 | Advanced/Unified-Weiche für alle HMI-Tools. Neue Hilfsfunktionen: `_hmi_screens()`, `_hmi_screens_import()`, `_hmi_screen_folders()`, `_hmi_tag_folders()`. Neues Tool: `create_hmi_structure`. Testabschnitte 6+7 um Unified-Spalte erweitert. README: API-Unterschiede-Tabelle ergänzt. |

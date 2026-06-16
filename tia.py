@@ -3,6 +3,28 @@ tia.py — TIA Portal Openness Anbindung
 STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# VERSION
+# ═══════════════════════════════════════════════════════════════════════════════
+VERSION      = "1.4.0"
+VERSION_DATE = "2026-06-15"
+VERSION_INFO = {
+    "version":      VERSION,
+    "date":         VERSION_DATE,
+    "file":         __file__,
+    "changes": [
+        "1.4.0: BUG-15 Fix: list_plc_tags comment-Feld via _mltext() korrekt auslesen",
+        "1.4.0: BUG-15 Fix: list_plc_tags comment-Feld via _mltext() korrekt auslesen",
+        "1.3.0: list_plc_blocks — alle Bausteine inkl. Untergruppen, optionaler Gruppenfilter",
+        "1.3.0: list_plc_tag_tables — alle Tag-Tabellen inkl. Untergruppen",
+        "1.3.0: list_plc_tags — Tags einer Tabelle mit Typ, Adresse, Kommentar",
+        "1.3.0: list_plc_udts — alle UDTs/Strukturen inkl. Untergruppen",
+        "1.2.0: import_hmi_screen Screen-Name aus XML gelesen für korrektes Delete-vor-Import",
+        "1.1.0: STA-Timeout 60s + Auto-Restart, export_hmi_tags Unified-Workaround, VBScriptFolder",
+        "1.0.0: BUG-11–14 gefixt: rekursive Screen-Suche, Unified-Typ-Erkennung, HmiTarget-API",
+    ]
+}
+
 import os, sys, threading, queue, logging, textwrap
 from pathlib import Path
 from typing import Any, Callable
@@ -74,9 +96,12 @@ def _tia_call(fn, *args, **kwargs):
 # STA THREAD
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_STA_TIMEOUT_DEFAULT  = 60   # Sekunden für normale Operationen
+_STA_TIMEOUT_HEAVY    = 300  # Sekunden für schwere Ops: open_project, compile, close_portal
+
 @dataclass
 class _Job:
-    fn: Callable; args: tuple; kwargs: dict; result_q: queue.Queue
+    fn: Callable; args: tuple; kwargs: dict; result_q: queue.Queue; timeout: float
 
 class _Err:
     def __init__(self, e): self.exception = e
@@ -89,12 +114,14 @@ class STAThread:
             if not cls._instance:
                 cls._instance = super().__new__(cls)
                 cls._instance._started = False
+                cls._instance._thread  = None
         return cls._instance
 
     def start(self):
         if self._started: return
         self._q: queue.Queue = queue.Queue()
-        threading.Thread(target=self._loop, name="TIA-STA", daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, name="TIA-STA", daemon=True)
+        self._thread.start()
         self._started = True
         _log("sta").info("STA Thread gestartet")
 
@@ -103,11 +130,35 @@ class STAThread:
         self._q.put(None); self._started = False
         _log("sta").info("STA Thread gestoppt")
 
-    def run(self, fn, *args, **kwargs):
+    def _restart(self):
+        """STA-Thread neu starten nach Timeout. Session-Handles zurücksetzen."""
+        _log("sta").warning("STA Thread neu gestartet nach Timeout.")
+        self._started = False
+        _sess.portal  = None
+        _sess.project = None
+        self._q = queue.Queue()
+        self._thread = threading.Thread(target=self._loop, name="TIA-STA", daemon=True)
+        self._thread.start()
+        self._started = True
+
+    def run(self, fn, *args, timeout=None, **kwargs):
         if not self._started: raise RuntimeError("STAThread nicht gestartet")
+        t = timeout if timeout is not None else _STA_TIMEOUT_DEFAULT
         rq = queue.Queue()
-        self._q.put(_Job(fn, args, kwargs, rq))
-        out = rq.get()
+        self._q.put(_Job(fn, args, kwargs, rq, t))
+        try:
+            out = rq.get(timeout=t)
+        except queue.Empty:
+            _log("sta").warning(f"STA Timeout nach {t}s — Thread wird neu gestartet.")
+            self._restart()
+            raise TiaError(
+                "STA_TIMEOUT",
+                f"TIA-Operation hat nach {t}s nicht geantwortet. "
+                "STA-Thread wurde neu gestartet. "
+                "Bitte connect_portal + attach_project erneut aufrufen.",
+                True,
+                {"hint": "STA thread restarted, session handles reset"}
+            )
         if isinstance(out, _Err): raise out.exception
         return out
 
@@ -118,7 +169,8 @@ class STAThread:
         while True:
             job = self._q.get()
             if job is None: break
-            try: job.result_q.put(job.fn(*job.args, **job.kwargs))
+            try:
+                job.result_q.put(job.fn(*job.args, **job.kwargs))
             except Exception as e:
                 _log("sta").error(str(e), exc_info=True)
                 job.result_q.put(_Err(e))
@@ -230,34 +282,162 @@ def attach_project():
                 "path":str(_sess.project.Path)}
     return sta.run(_tia_call, _run)
 
-def open_project(path):
+def open_project(path, retries=10, retry_delay=10):
+    """
+    Projekt oeffnen (.ap21).
+    retries/retry_delay: Wartet bis TIA Portal bereit ist — sinnvoll nach connect_portal(mode='gui').
+    Standard: 10 Versuche x 10 Sekunden = max. 100 Sekunden.
+    """
+    import time
     def _run():
         _sess.ensure_portal()
         from System.IO import FileInfo
         fi = FileInfo(path)
         if not fi.Exists: raise TiaError("FILE_NOT_FOUND",f"Nicht gefunden: {path}",True)
-        _sess.project = _sess.portal.Projects.Open(fi)
-        _log("session").info(f"Projekt: {_sess.project.Name}")
-        return {"status":"ok","project":_sess.project.Name,"path":path}
+        last_exc = None
+        for attempt in range(max(1, retries)):
+            try:
+                _sess.project = _sess.portal.Projects.Open(fi)
+                _log("session").info(f"Projekt: {_sess.project.Name} (Versuch {attempt+1})")
+                return {"status":"ok","project":_sess.project.Name,"path":path}
+            except Exception as e:
+                last_exc = e
+                _log("session").warning(f"open_project Versuch {attempt+1}/{retries} fehlgeschlagen: {e}")
+                if attempt < retries - 1:
+                    time.sleep(retry_delay)
+        raise _translate(last_exc)
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
+
+def save_project():
+    """Aktuelles Projekt speichern."""
+    def _run():
+        _sess.ensure_project()
+        _sess.project.Save()
+        _log("session").info(f"Projekt gespeichert: {_sess.project.Name}")
+        return {"status":"ok","project":_sess.project.Name}
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
+
+def close_project():
+    """
+    Aktuelles Projekt schliessen (ohne Speichern).
+    Vorher save_project() aufrufen um Aenderungen zu sichern.
+    """
+    def _run():
+        _sess.ensure_project()
+        name = _sess.project.Name
+        _sess.project.Close()
+        _sess.project = None
+        _log("session").info(f"Projekt geschlossen: {name}")
+        return {"status":"ok","closed":name}
     return sta.run(_tia_call, _run)
 
+def close_portal():
+    """
+    TIA Portal beenden (Dispose + taskkill).
+    Schliesst alle offenen Projekte und beendet den TIA-Prozess.
+    Vorher save_project() und close_project() aufrufen.
+    """
+    import threading as _threading
+    import subprocess as _subprocess
+
+    if not _sess.portal:
+        raise TiaError("NOT_CONNECTED", "Nicht verbunden. connect_portal aufrufen.", True)
+
+    # PID vor dem Dispose merken — danach ist der Portal-Handle ggf. ungültig
+    pid_holder = [None]
+    def _get_pid():
+        try:
+            from Siemens.Engineering import TiaPortal
+            procs = list(TiaPortal.GetProcesses())
+            if procs:
+                pid_holder[0] = procs[0].Id
+        except Exception:
+            pass
+    try:
+        sta.run(_get_pid)
+    except Exception:
+        pass
+
+    # Dispose im STA-Thread mit 30s-Timeout
+    done = _threading.Event()
+    dispose_error = [None]
+
+    def _dispose():
+        try:
+            if _sess.portal:
+                _sess.portal.Dispose()
+        except Exception as e:
+            dispose_error[0] = e
+        finally:
+            _sess.portal  = None
+            _sess.project = None
+            done.set()
+
+    rq = queue.Queue()
+    sta._q.put(_Job(_dispose, (), {}, rq, 30))
+
+    timed_out = not done.wait(timeout=30)
+    if timed_out:
+        _log("session").warning("close_portal: Dispose-Timeout nach 30s")
+        _sess.portal  = None
+        _sess.project = None
+
+    if dispose_error[0]:
+        _log("session").warning(f"close_portal Dispose-Fehler (ignoriert): {dispose_error[0]}")
+
+    # Prozess killen — Dispose trennt nur die API-Verbindung, beendet TIA nicht immer
+    killed = False
+    if pid_holder[0]:
+        try:
+            _subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid_holder[0])],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+                timeout=10
+            )
+            killed = True
+            _log("session").info(f"TIA Portal Prozess {pid_holder[0]} beendet.")
+        except Exception as ke:
+            _log("session").error(f"taskkill fehlgeschlagen: {ke}")
+
+    msg = "TIA Portal beendet."
+    if timed_out:
+        msg = "TIA Portal beendet (Dispose-Timeout, force kill)."
+    elif killed:
+        msg = "TIA Portal beendet."
+
+    return {"status": "ok", "message": msg}
+
 def get_session_status():
-    ver = None
-    for v in _VERSIONS:
-        for sub in [f"PublicAPI/{v}/net48", f"PublicAPI/{v}"]:
-            p = Path(_TIA_BASE) / f"Portal {v}" / sub
-            if (p / "Siemens.Engineering.Base.dll").exists() or                (p / "Siemens.Engineering.dll").exists():
-                ver = v; break
-        if ver: break
-    return {"tia_installed":ver,"portal_connected":_sess.portal is not None,
-            "project_open":_sess.project is not None,
-            "project_name":_sess.project.Name if _sess.project else None}
+    def _run():
+        ver = None
+        for v in _VERSIONS:
+            for sub in [f"PublicAPI/{v}/net48", f"PublicAPI/{v}"]:
+                p = Path(_TIA_BASE) / f"Portal {v}" / sub
+                if (p / "Siemens.Engineering.Base.dll").exists() or \
+                   (p / "Siemens.Engineering.dll").exists():
+                    ver = v; break
+            if ver: break
+        # project.Name nur aufrufen wenn Projekt bekannt — im STA-Thread ist das sicher
+        proj_name = None
+        if _sess.project:
+            try:
+                proj_name = _sess.project.Name
+            except Exception:
+                proj_name = None
+        return {
+            "tia_installed":    ver,
+            "portal_connected": _sess.portal  is not None,
+            "project_open":     _sess.project is not None,
+            "project_name":     proj_name,
+        }
+    return sta.run(_tia_call, _run)
 
 def get_project_info():
     def _run():
         _sess.ensure_project(); p = _sess.project
         return {"name":p.Name,"path":str(p.Path),
-                "devices":[{"name":d.Name,"type":str(d.TypeIdentifier)} for d in p.Devices]}
+                "devices":[{"name":d.Name,"type":str(d.TypeIdentifier)}
+                           for d in _iter_all_devices(p)]}
     return sta.run(_tia_call, _run)
 
 def list_devices():
@@ -266,17 +446,17 @@ def list_devices():
         import Siemens.Engineering as eng
         sw_type = _get_sw_container_type()
         result = []
-        for device in _sess.project.Devices:
+        for device in _iter_all_devices(_sess.project):
             sw_list = []
             stack = list(device.DeviceItems)
             while stack:
                 item = stack.pop()
                 sw = _try_get_software(item, "", sw_type, eng)
                 if sw:
-                    tn = type(sw).__name__
-                    hw = "Unified"  if "Unified" in tn else \
-                         "Advanced" if "Hmi"     in tn else \
-                         "PLC"      if "Plc"     in tn else tn
+                    full = type(sw).__module__ + "." + type(sw).__name__
+                    hw = "Unified"  if "HmiUnified" in full else \
+                         "Advanced" if "Hmi"        in full else \
+                         "PLC"      if "Plc"        in full else type(sw).__name__
                     sw_list.append({"item": item.Name, "type": hw})
                 try:
                     for sub in item.DeviceItems: stack.append(sub)
@@ -291,18 +471,146 @@ def list_devices():
 
 def _get_hmi(device_name):
     import Siemens.Engineering as eng
-    for device in _sess.project.Devices:
-        if device.Name != device_name: continue
+    sw_type = _get_sw_container_type()
+    all_names = []
+    for device in _iter_all_devices(_sess.project):
+        all_names.append(device.Name)
+        if device.Name != device_name:
+            continue
         for item in device.DeviceItems:
-            try:
-                swc = item.GetService[eng.SW.SoftwareContainer]()
-                if swc:
-                    sw = swc.Software; tn = type(sw).__name__
-                    if "Unified" in tn: return sw,"Unified"
-                    if "Hmi"     in tn: return sw,"Advanced"
-            except Exception: pass
-    raise TiaError("HMI_NOT_FOUND",f"HMI '{device_name}' nicht gefunden.",True,
-                   {"available":[d.Name for d in _sess.project.Devices]})
+            sw = _try_get_software(item, "", sw_type, eng)
+            if sw:
+                # BUG-13 Fix: FullName prüfen, nicht nur __name__
+                # IronPython gibt type.__name__ = "HmiSoftware" für BEIDE Typen zurück
+                # aber type.__module__ unterscheidet: "HmiUnified" vs "Hmi"
+                full = type(sw).__module__ + "." + type(sw).__name__
+                if "HmiUnified" in full: return sw, "Unified"
+                if "Hmi"        in full: return sw, "Advanced"
+    raise TiaError("HMI_NOT_FOUND", f"HMI '{device_name}' nicht gefunden.", True,
+                   {"available": all_names})
+
+def _hmi_tag_tables(sw):
+    """
+    HMI Tag-Tabellen-Collection zurückgeben.
+    Unified + Advanced neu:  sw.TagTables direkt
+    Advanced HmiTarget:      sw.TagFolder.TagTables
+    V19/V20 Unified alt:     sw.TagTableGroup.TagTables
+    """
+    if hasattr(sw, "TagTables"):
+        return sw.TagTables
+    if hasattr(sw, "TagFolder"):
+        return sw.TagFolder.TagTables
+    if hasattr(sw, "TagTableGroup"):
+        return sw.TagTableGroup.TagTables
+    return []
+
+def _hmi_tag_tables_import(sw, fi, eng):
+    """Import-Methode je nach API-Version."""
+    if hasattr(sw, "TagTables"):
+        sw.TagTables.Import(fi, eng.ImportOptions.Override)
+    elif hasattr(sw, "TagFolder"):
+        sw.TagFolder.TagTables.Import(fi, eng.ImportOptions.Override)
+    elif hasattr(sw, "TagTableGroup"):
+        sw.TagTableGroup.Import(fi, eng.ImportOptions.Override)
+    else:
+        raise TiaError("TAG_IMPORT_NOT_SUPPORTED", "Keine Import-Methode für HMI-Tags gefunden.", False)
+
+def _hmi_screens(sw):
+    """
+    Alle HMI-Screens liefern — rekursiv aus Gruppen/Ordnern.
+    Unified + Advanced neu:  Screens in sw.ScreenGroups (rekursiv)
+    Advanced HmiTarget:      Screens in sw.ScreenFolder.Folders (rekursiv)
+    Fallback:                sw.Screens direkt
+    """
+    screens = []
+
+    def _collect_from_groups(collection):
+        for grp in collection:
+            for s in grp.Screens:
+                screens.append(s)
+            sub = getattr(grp, "ScreenGroups", None) or getattr(grp, "Folders", None)
+            if sub:
+                try: _collect_from_groups(sub)
+                except Exception: pass
+
+    def _collect_from_folder(folder):
+        for s in folder.Screens:
+            screens.append(s)
+        for sub in folder.Folders:
+            _collect_from_folder(sub)
+
+    if hasattr(sw, "ScreenGroups"):
+        _collect_from_groups(sw.ScreenGroups)
+        if hasattr(sw, "Screens"):
+            for s in sw.Screens:
+                screens.append(s)
+        return screens
+
+    if hasattr(sw, "ScreenFolder"):
+        _collect_from_folder(sw.ScreenFolder)
+        return screens
+
+    if hasattr(sw, "Screens"):
+        return list(sw.Screens)
+    if hasattr(sw, "ScreenCollection"):
+        return list(sw.ScreenCollection)
+    return []
+
+def _hmi_screens_import(sw, fi, eng):
+    """Screen-Import je nach API-Version."""
+    if hasattr(sw, "Screens") and hasattr(sw.Screens, "Import"):
+        sw.Screens.Import(fi, eng.ImportOptions.Override)
+        return
+    if hasattr(sw, "ScreenFolder"):
+        sf = sw.ScreenFolder
+        if hasattr(sf, "Screens") and hasattr(sf.Screens, "Import"):
+            sf.Screens.Import(fi, eng.ImportOptions.Override)
+            return
+    if hasattr(sw, "ScreenCollection") and hasattr(sw.ScreenCollection, "Import"):
+        sw.ScreenCollection.Import(fi, eng.ImportOptions.Override)
+        return
+    raise TiaError("SCREEN_IMPORT_NOT_SUPPORTED",
+                   "Keine Import-Methode für HMI-Screens gefunden.", False)
+
+def _hmi_screen_folders(sw):
+    """
+    Oberste Ordner-Collection für Screens zurückgeben.
+    Unified + Advanced neu:  sw.ScreenGroups
+    Advanced HmiTarget:      sw.ScreenFolder.Folders
+    """
+    if hasattr(sw, "ScreenGroups"):
+        return sw.ScreenGroups, "ScreenGroups"
+    if hasattr(sw, "ScreenFolders"):
+        return sw.ScreenFolders, "ScreenFolders"
+    if hasattr(sw, "ScreenFolder"):
+        return sw.ScreenFolder.Folders, "Folders"
+    return None, None
+
+def _hmi_tag_folders(sw):
+    """
+    Oberste Ordner-Collection für Tag-Tabellen zurückgeben.
+    Unified + Advanced neu:  sw.TagTableGroups
+    Advanced HmiTarget:      sw.TagFolder.Folders
+    Advanced älter:          sw.TagTableGroup (singular)
+    """
+    if hasattr(sw, "TagTableGroups"):
+        return sw.TagTableGroups, "TagTableGroups"
+    if hasattr(sw, "TagFolder"):
+        return sw.TagFolder.Folders, "Folders"
+    if hasattr(sw, "TagTableGroup"):
+        return sw.TagTableGroup, "TagTableGroup"
+    return None, None
+
+def _ensure_folder(collection, name, sub_attr):
+    """
+    Gibt einen Ordner mit `name` aus `collection` zurück.
+    Legt ihn an falls nicht vorhanden.
+    sub_attr: Name der Unterordner-Collection am Ordner-Objekt (z.B. 'ScreenGroups').
+    """
+    for f in collection:
+        if f.Name == name:
+            return f
+    return collection.Create(name)
 
 def list_hmi_screens(device_name):
     def _run():
@@ -310,14 +618,14 @@ def list_hmi_screens(device_name):
         screens = [{"name":s.Name,"width":getattr(s,"Width",None),
                     "height":getattr(s,"Height",None),
                     "items":s.ScreenItems.Count if hasattr(s,"ScreenItems") else None}
-                   for s in sw.Screens]
+                   for s in _hmi_screens(sw)]
         return {"device":device_name,"hmi_type":ht,"screens":screens,"count":len(screens)}
     return sta.run(_tia_call, _run)
 
 def list_hmi_tags(device_name, table_name=None):
     def _run():
         _sess.ensure_project(); sw,ht = _get_hmi(device_name); tags = []
-        for table in sw.TagTableGroup.TagTables:
+        for table in _hmi_tag_tables(sw):
             if table_name and table.Name != table_name: continue
             for tag in table.Tags:
                 tags.append({"name":tag.Name,"table":table.Name,
@@ -349,39 +657,151 @@ def list_hmi_textlists(device_name):
         return {"device":device_name,"hmi_type":ht,"textlists":tls,"count":len(tls)}
     return sta.run(_tia_call, _run)
 
+def _unified_screen_files(project_path):
+    """
+    Sucht Unified-Screen-Dateien (.hmiScreen) im TIA-Projektordner rekursiv.
+    Gibt Dict zurück: {screen_stem: Path}
+    """
+    import glob as _glob
+    proj_dir = Path(project_path).parent
+    screens = {}
+    for f in _glob.glob(str(proj_dir / "**" / "*.hmiScreen"), recursive=True):
+        p = Path(f)
+        screens[p.stem] = p
+    return screens
+
+
 def export_hmi_screen(device_name, screen_name, output_path):
+    """
+    Einzelnen HMI-Screen exportieren.
+    Advanced: s.Export(FileInfo) — direkter API-Export.
+    Unified:  Keine Export-API in V21 — .hmiScreen-Datei aus Projektordner kopieren.
+    """
     def _run():
         _sess.ensure_project()
-        import Siemens.Engineering as eng; from System.IO import FileInfo
-        sw,ht = _get_hmi(device_name)
-        for s in sw.Screens:
-            if s.Name == screen_name:
-                s.Export(FileInfo(output_path), eng.ExportOptions.WithDefaults)
-                return {"status":"ok","device":device_name,"screen":screen_name,"output":output_path}
-        raise TiaError("SCREEN_NOT_FOUND",f"Screen '{screen_name}' nicht gefunden.",True,
-                       {"available":[s.Name for s in sw.Screens]})
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        all_screens = _hmi_screens(sw)
+        screen_names = [s.Name for s in all_screens]
+
+        if screen_name not in screen_names:
+            raise TiaError("SCREEN_NOT_FOUND", f"Screen '{screen_name}' nicht gefunden.", True,
+                           {"available": screen_names})
+
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        if ht == "Advanced":
+            for s in all_screens:
+                if s.Name == screen_name:
+                    if p.exists(): p.unlink()
+                    s.Export(FileInfo(str(p)), eng.ExportOptions.WithDefaults)
+                    return {"status": "ok", "device": device_name, "hmi_type": ht,
+                            "screen": screen_name, "output": str(p), "method": "api_export"}
+
+        # Unified: Dateisystem
+        proj_path = str(_sess.project.Path)
+        screen_files = _unified_screen_files(proj_path)
+        if screen_name not in screen_files:
+            raise TiaError("SCREEN_FILE_NOT_FOUND",
+                f"Screen '{screen_name}' nicht als .hmiScreen-Datei gefunden. "
+                "Projekt speichern und erneut versuchen.",
+                True, {"available_files": list(screen_files.keys())})
+        import shutil as _shutil
+        src = screen_files[screen_name]
+        if p.exists(): p.unlink()
+        _shutil.copy2(str(src), str(p))
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "screen": screen_name, "output": str(p),
+                "method": "filesystem_copy", "source": str(src)}
     return sta.run(_tia_call, _run)
 
-def export_hmi_tags(device_name, output_path):
+def export_hmi_tags(device_name, output_path=None):
+    """Alle HMI Tag-Tabellen exportieren. output_path = Zielordner (Standard: C:\\tia-mcp\\export)."""
     def _run():
         _sess.ensure_project()
-        import Siemens.Engineering as eng; from System.IO import FileInfo
-        sw,ht = _get_hmi(device_name)
-        sw.TagTableGroup.Export(FileInfo(output_path), eng.ExportOptions.WithDefaults)
-        return {"status":"ok","device":device_name,"output":output_path}
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir = _export_dir(output_path)
+
+        exported = []
+        tables = _hmi_tag_tables(sw)
+        for table in tables:
+            safe_name = table.Name.replace(" ", "_").replace("/", "_")
+            if safe_name == "Default_tag_table":
+                continue  # Default-Tabelle überspringen
+
+            # Advanced HmiTarget / ältere API: table.Export(FileInfo)
+            if hasattr(table, "Export"):
+                xml_file = out_dir / f"hmi_tags_{safe_name}.xml"
+                if xml_file.exists(): xml_file.unlink()
+                table.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                exported.append(str(xml_file))
+
+            # Unified V21: table.Tags.Export(DirectoryInfo) — Workaround
+            elif hasattr(table, "Tags") and hasattr(table.Tags, "Export"):
+                tag_dir = out_dir / f"hmi_tags_{safe_name}"
+                tag_dir.mkdir(parents=True, exist_ok=True)
+                table.Tags.Export(DirectoryInfo(str(tag_dir)))
+                exported.append(str(tag_dir))
+
+        # Fallback: TagTableGroups — Tabellen in Untergruppen
+        if not exported and hasattr(sw, "TagTableGroups"):
+            for grp in sw.TagTableGroups:
+                for table in grp.TagTables:
+                    safe_name = table.Name.replace(" ", "_").replace("/", "_")
+                    if hasattr(table, "Tags") and hasattr(table.Tags, "Export"):
+                        tag_dir = out_dir / f"hmi_tags_{safe_name}"
+                        tag_dir.mkdir(parents=True, exist_ok=True)
+                        table.Tags.Export(DirectoryInfo(str(tag_dir)))
+                        exported.append(str(tag_dir))
+
+        if not exported:
+            raise TiaError("NO_TAG_TABLES",
+                f"HMI '{device_name}' hat keine exportierbaren Tag-Tabellen.", True)
+
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "exported": exported, "count": len(exported)}
     return sta.run(_tia_call, _run)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BIBLIOTHEK
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _lib_name(lib):
+    """Bibliotheksname sicher auslesen — V21 hat kein .Name auf ProjectLibrary."""
+    for attr in ("Name", "Caption", "RootGroup"):
+        try:
+            v = getattr(lib, attr, None)
+            if v is not None:
+                return str(v)
+        except Exception:
+            pass
+    return "ProjectLibrary"
+
+def _global_libraries():
+    """GlobalLibraries — in V21 am Portal, in V19/V20 am Projekt."""
+    for src in (_sess.portal, _sess.project):
+        if src is None:
+            continue
+        try:
+            return list(src.GlobalLibraries)
+        except Exception:
+            pass
+    return []
+
 def _find_lib(name):
     p = _sess.project
-    if p.ProjectLibrary.Name == name: return p.ProjectLibrary,"project"
-    for gl in p.GlobalLibraries:
-        if gl.Name == name: return gl,"global"
-    raise TiaError("LIBRARY_NOT_FOUND",f"Bibliothek '{name}' nicht gefunden.",True,
-                   {"available":[p.ProjectLibrary.Name]+[gl.Name for gl in p.GlobalLibraries]})
+    pl_name = _lib_name(p.ProjectLibrary)
+    if pl_name == name:
+        return p.ProjectLibrary, "project"
+    for gl in _global_libraries():
+        if _lib_name(gl) == name:
+            return gl, "global"
+    raise TiaError("LIBRARY_NOT_FOUND", f"Bibliothek '{name}' nicht gefunden.", True,
+                   {"available": [pl_name] + [_lib_name(gl) for gl in _global_libraries()]})
 
 def _collect_types(folder, result, path=""):
     for t in folder.Types:
@@ -401,12 +821,15 @@ def list_libraries():
     def _run():
         _sess.ensure_project(); p = _sess.project
         pl = p.ProjectLibrary
-        libs = [{"name":pl.Name,"scope":"project",
-                 "types":pl.TypeFolder.Types.Count,"copies":pl.MasterCopyFolder.MasterCopies.Count}]
-        for gl in p.GlobalLibraries:
-            libs.append({"name":gl.Name,"scope":"global","path":str(gl.Path),
-                         "types":gl.TypeFolder.Types.Count,"copies":gl.MasterCopyFolder.MasterCopies.Count})
-        return {"libraries":libs,"count":len(libs)}
+        pl_name = _lib_name(pl)
+        libs = [{"name": pl_name, "scope": "project",
+                 "types":  pl.TypeFolder.Types.Count,
+                 "copies": pl.MasterCopyFolder.MasterCopies.Count}]
+        for gl in _global_libraries():
+            libs.append({"name": _lib_name(gl), "scope": "global", "path": str(gl.Path),
+                         "types":  gl.TypeFolder.Types.Count,
+                         "copies": gl.MasterCopyFolder.MasterCopies.Count})
+        return {"libraries": libs, "count": len(libs)}
     return sta.run(_tia_call, _run)
 
 def list_library_types(library_name):
@@ -453,6 +876,29 @@ _SAFE_BUILTINS  = {
     "getattr":getattr,"isinstance":isinstance,"type":type,
     "None":None,"True":True,"False":False,
 }
+
+def _iter_all_devices(project):
+    """
+    Liefert alle Devices aus project.Devices UND allen project.DeviceGroups (rekursiv).
+    Nötig weil TIA-Projekte mit Gerätegruppen (Ordner) die Devices nicht auf Top-Level haben.
+    """
+    # Top-Level
+    for device in project.Devices:
+        yield device
+    # DeviceGroups rekursiv (Stack statt Rekursion)
+    try:
+        group_stack = list(project.DeviceGroups)
+        while group_stack:
+            grp = group_stack.pop()
+            for device in grp.Devices:
+                yield device
+            try:
+                for sub in grp.Groups:
+                    group_stack.append(sub)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def _get_sw_container_type():
     """
@@ -501,7 +947,7 @@ def _find_sw(project, name, hint, eng):
 
     sw_type = _SW_CONTAINER_TYPE
 
-    for device in project.Devices:
+    for device in _iter_all_devices(project):
         stack = list(device.DeviceItems)
         while stack:
             item = stack.pop()
@@ -546,6 +992,26 @@ def _to_json(obj):
     try: return str(obj)
     except: return f"<{type(obj).__name__}>"
 
+
+def _mltext(obj, lang="de-DE"):
+    """MultilingualText-Objekt sicher als String auslesen (BUG-15)."""
+    if obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    try:
+        items = obj.Items
+        for item in items:
+            if str(getattr(item, "Language", "")).startswith(lang[:2]):
+                return str(item.Text) if item.Text else ""
+        for item in items:
+            t = str(item.Text) if item.Text else ""
+            if t:
+                return t
+    except Exception:
+        pass
+    return ""
+
 def execute_openness(code, mode="read"):
     cl = code.lower()
     for kw in _BLOCKED_ALWAYS:
@@ -583,7 +1049,10 @@ def execute_openness(code, mode="read"):
             "SoftwareContainer": sw_container_type,
             "safe_str":      lambda o: str(o) if o is not None else None,
             "collect":       lambda c: list(c),
-            "find_software": lambda n,h="": _find_sw(_sess.project,n,h,eng),
+            "find_software": lambda n, h="": _find_sw(_sess.project, n, h, eng),
+            # Alle Devices inkl. DeviceGroups iterieren:
+            # for dev in iter_devices(): ...
+            "iter_devices":  lambda: _iter_all_devices(_sess.project),
         }
         exec(textwrap.dedent(code), {"__builtins__":_SAFE_BUILTINS}, ctx)
         return {"status":"ok","mode":mode,"result":_to_json(ctx.get("result"))}
@@ -620,6 +1089,182 @@ def _find_block(plc_sw, block_name):
             stack.append(sub)
     return None
 
+def list_plc_blocks(device_name, group=None):
+    """
+    Alle PLC-Bausteine auflisten.
+    Durchsucht BlockGroup rekursiv inkl. Untergruppen.
+    group: optionaler Gruppenname für Filterung (z.B. "Ventile").
+    Rückgabe je Baustein: name, type (OB/FC/FB/DB), language, number, group, is_consistent.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        blocks = []
+
+        def _collect(bg, path):
+            for b in bg.Blocks:
+                btype = b.GetType().Name  # OB, FC, FB, DB, PlcStruct etc.
+                lang  = str(getattr(b, "ProgrammingLanguage", "?"))
+                blocks.append({
+                    "name":          b.Name,
+                    "type":          btype,
+                    "language":      lang,
+                    "number":        getattr(b, "Number", None),
+                    "group":         path,
+                    "is_consistent": getattr(b, "IsConsistent", None),
+                })
+            for g in bg.Groups:
+                gpath = (path + "/" if path else "") + g.Name
+                _collect(g, gpath)
+
+        _collect(plc.BlockGroup, "")
+
+        # Filtern nach Gruppe wenn angegeben
+        if group:
+            blocks = [b for b in blocks if b["group"] == group or b["group"].startswith(group + "/")]
+
+        return {
+            "device":  device_name,
+            "count":   len(blocks),
+            "blocks":  blocks,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def list_plc_tag_tables(device_name):
+    """
+    Alle PLC-Tag-Tabellen auflisten inkl. Untergruppen.
+    Rückgabe je Tabelle: name, group, tag_count.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        tables = []
+
+        def _collect(ttg, path):
+            for tt in ttg.TagTables:
+                tables.append({
+                    "name":      tt.Name,
+                    "group":     path,
+                    "tag_count": tt.Tags.Count,
+                })
+            for g in ttg.Groups:
+                gpath = (path + "/" if path else "") + g.Name
+                _collect(g, gpath)
+
+        _collect(plc.TagTableGroup, "")
+
+        return {
+            "device": device_name,
+            "count":  len(tables),
+            "tables": tables,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def list_plc_tags(device_name, table_name):
+    """
+    Alle Tags einer PLC-Tag-Tabelle auflisten.
+    Rückgabe je Tag: name, data_type, logical_address, comment, visible.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        # Tag-Tabelle suchen (Top-Level + Gruppen)
+        found_table = None
+
+        def _find(ttg):
+            for tt in ttg.TagTables:
+                if tt.Name == table_name:
+                    return tt
+            for g in ttg.Groups:
+                result = _find(g)
+                if result:
+                    return result
+            return None
+
+        found_table = _find(plc.TagTableGroup)
+        if not found_table:
+            # Available-Liste aufbauen
+            all_tables = []
+            def _list(ttg):
+                for tt in ttg.TagTables:
+                    all_tables.append(tt.Name)
+                for g in ttg.Groups:
+                    _list(g)
+            _list(plc.TagTableGroup)
+            raise TiaError("TABLE_NOT_FOUND",
+                f"Tag-Tabelle '{table_name}' nicht gefunden.", True,
+                {"available": all_tables})
+
+        tags = []
+        for tag in found_table.Tags:
+            tags.append({
+                "name":            tag.Name,
+                "data_type":       str(getattr(tag, "DataTypeName", "?")),
+                "logical_address": str(getattr(tag, "LogicalAddress", "")),
+                "comment":         _mltext(getattr(tag, "Comment", None)),
+                "visible":         getattr(tag, "Visible", None),
+            })
+
+        return {
+            "device":     device_name,
+            "table":      table_name,
+            "tag_count":  len(tags),
+            "tags":       tags,
+        }
+    return sta.run(_tia_call, _run)
+
+
+def list_plc_udts(device_name):
+    """
+    Alle PLC-UDTs (Strukturen) auflisten inkl. Untergruppen.
+    Rückgabe je UDT: name, group, is_consistent, modified_date.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        udts = []
+
+        def _collect(tg, path):
+            for udt in tg.Types:
+                udts.append({
+                    "name":          udt.Name,
+                    "type":          udt.GetType().Name,  # PlcStruct, PlcTypedeF...
+                    "group":         path,
+                    "is_consistent": getattr(udt, "IsConsistent", None),
+                    "modified_date": str(getattr(udt, "ModifiedDate", "") or ""),
+                })
+            for g in tg.Groups:
+                gpath = (path + "/" if path else "") + g.Name
+                _collect(g, gpath)
+
+        _collect(plc.TypeGroup, "")
+
+        return {
+            "device": device_name,
+            "count":  len(udts),
+            "udts":   udts,
+        }
+    return sta.run(_tia_call, _run)
+
+
 def export_plc_block(device_name, block_name, output_path=None):
     def _run():
         _sess.ensure_project()
@@ -636,6 +1281,7 @@ def export_plc_block(device_name, block_name, output_path=None):
                            {"available": avail})
         out_dir = _export_dir(output_path)
         xml_file = out_dir / f"{block_name}.xml"
+        if xml_file.exists(): xml_file.unlink()   # TIA überschreibt nicht
         block.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
         _log("plc").info(f"Exportiert: {block_name} → {xml_file}")
         return {"status": "ok", "block": block_name, "type": type(block).__name__,
@@ -678,6 +1324,7 @@ def get_plc_block_source(device_name, block_name, output_path=None):
 
         out_dir  = _export_dir(output_path)
         xml_file = out_dir / f"{block_name}.xml"
+        if xml_file.exists(): xml_file.unlink()   # TIA überschreibt nicht
         block.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
 
         # XML lesen
@@ -708,14 +1355,30 @@ def get_plc_block_source(device_name, block_name, output_path=None):
     return sta.run(_tia_call, _run)
 
 def _extract_scl(xml_content: str) -> str | None:
-    """SCL-Quellcode aus TIA-XML extrahieren."""
+    """
+    SCL-Quellcode aus TIA-XML extrahieren.
+    V19/V20: <StructuredText>CODE</StructuredText> oder <Body>CODE</Body>
+    V21:     <StructuredText xmlns="...v4"><Token Text="..."/><Token Text="..."/>...</StructuredText>
+    """
     import re
-    # TIA Portal speichert SCL in <StructuredText> oder <Body>
-    for tag in ["StructuredText", "Body", "SourceText"]:
+    # V21: Token-basiertes Format (Schema v4)
+    m = re.search(r"<StructuredText[^>]*>(.*?)</StructuredText>", xml_content, re.DOTALL)
+    if m:
+        inner = m.group(1).strip()
+        if inner:
+            # Token-Elemente zusammensetzen
+            tokens = re.findall(r'<Token[^>]+Text="([^"]*)"', inner)
+            if tokens:
+                return "".join(tokens)
+            # Kein Token — CDATA oder reiner Text
+            src = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", inner, flags=re.DOTALL).strip()
+            if src:
+                return src
+    # Ältere Formate
+    for tag in ["Body", "SourceText"]:
         m = re.search(rf"<{tag}>(.*?)</{tag}>", xml_content, re.DOTALL)
         if m:
             src = m.group(1).strip()
-            # CDATA entfernen falls vorhanden
             src = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", src, flags=re.DOTALL)
             if src:
                 return src
@@ -737,6 +1400,7 @@ def export_plc_tagtable(device_name, table_name, output_path=None):
             if table.Name == table_name:
                 out_dir  = _export_dir(output_path)
                 xml_file = out_dir / f"plc_tags_{table_name}.xml"
+                if xml_file.exists(): xml_file.unlink()
                 table.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
                 return {"status": "ok", "table": table_name, "xml_path": str(xml_file)}
         raise TiaError("TABLE_NOT_FOUND", f"Tag-Tabelle '{table_name}' nicht gefunden.", True)
@@ -765,32 +1429,324 @@ def export_hmi_tagtable(device_name, table_name, output_path=None):
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
-        from System.IO import FileInfo
+        from System.IO import FileInfo, DirectoryInfo
         sw, ht = _get_hmi(device_name)
-        for table in sw.TagTableGroup.TagTables:
+        for table in _hmi_tag_tables(sw):
             if table.Name == table_name:
-                out_dir  = _export_dir(output_path)
-                xml_file = out_dir / f"hmi_tags_{table_name}.xml"
-                table.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-                return {"status": "ok", "device": device_name, "hmi_type": ht,
-                        "table": table_name, "xml_path": str(xml_file)}
-        raise TiaError("TABLE_NOT_FOUND", f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True)
+                # V19/V20: Export() direkt auf Tabelle
+                if hasattr(table, "Export") and callable(getattr(table, "Export")):
+                    out_dir  = _export_dir(output_path)
+                    xml_file = out_dir / f"hmi_tags_{table_name}.xml"
+                    if xml_file.exists(): xml_file.unlink()
+                    table.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                    return {"status": "ok", "device": device_name, "hmi_type": ht,
+                            "table": table_name, "xml_path": str(xml_file)}
+                # V21 WinCC Advanced/Unified: Tags.Export(DirectoryInfo)
+                if hasattr(table, "Tags") and hasattr(table.Tags, "Export"):
+                    out_dir = _export_dir(output_path) / f"hmi_tags_{table_name}"
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    files = list(table.Tags.Export(DirectoryInfo(str(out_dir))))
+                    exported = [str(f) for f in files]
+                    return {"status": "ok", "device": device_name, "hmi_type": ht,
+                            "table": table_name, "exported": exported,
+                            "export_dir": str(out_dir)}
+                raise TiaError("TAG_EXPORT_NOT_SUPPORTED",
+                    f"HMI Tag-Tabelle '{table_name}' gefunden, aber kein Export verfügbar "
+                    f"({ht}). Workaround: list_hmi_tags + write_import_file.", False,
+                    {"table": table_name, "hmi_type": ht})
+        available = [t.Name for t in _hmi_tag_tables(sw)]
+        raise TiaError("TABLE_NOT_FOUND", f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True,
+                       {"available": available})
     return sta.run(_tia_call, _run)
 
 def import_hmi_tagtable(device_name, file_path):
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
-        from System.IO import FileInfo
+        from System.IO import FileInfo, DirectoryInfo
         sw, ht = _get_hmi(device_name)
-        fi = FileInfo(file_path)
-        if not fi.Exists:
-            raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
-        sw.TagTableGroup.Import(fi, eng.ImportOptions.Override)
+        p = Path(file_path)
+        if not p.exists():
+            raise TiaError("FILE_NOT_FOUND", f"Datei/Ordner nicht gefunden: {file_path}", True)
+        # Ordner-Import (V21 Tags.Import(DirectoryInfo))
+        if p.is_dir():
+            for table in _hmi_tag_tables(sw):
+                if hasattr(table, "Tags") and hasattr(table.Tags, "Import"):
+                    table.Tags.Import(DirectoryInfo(str(p)))
+                    return {"status": "ok", "device": device_name, "imported_from": file_path}
+        # Datei-Import (V19/V20)
+        _hmi_tag_tables_import(sw, FileInfo(str(p)), eng)
         return {"status": "ok", "device": device_name, "imported_from": file_path}
     return sta.run(_tia_call, _run)
 
+
+def import_hmi_tags(device_name, file_path):
+    """Alle HMI-Tags aus Datei oder Ordner importieren."""
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        sw, ht = _get_hmi(device_name)
+        p = Path(file_path)
+        if not p.exists():
+            raise TiaError("FILE_NOT_FOUND", f"Datei/Ordner nicht gefunden: {file_path}", True)
+        if p.is_dir():
+            for table in _hmi_tag_tables(sw):
+                if hasattr(table, "Tags") and hasattr(table.Tags, "Import"):
+                    table.Tags.Import(DirectoryInfo(str(p)))
+            return {"status": "ok", "device": device_name, "imported_from": file_path}
+        _hmi_tag_tables_import(sw, FileInfo(str(p)), eng)
+        return {"status": "ok", "device": device_name, "imported_from": file_path}
+    return sta.run(_tia_call, _run)
+
+
+def export_hmi_screens_all(device_name, output_path=None):
+    """
+    Alle HMI-Screens exportieren.
+    Advanced: s.Export(FileInfo). Unified: .hmiScreen-Dateien aus Projektordner kopieren.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir = (_export_dir(None) / f"hmi_screens_{device_name}") \
+                  if not output_path else Path(output_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        all_screens = _hmi_screens(sw)
+        if not all_screens:
+            raise TiaError("NO_SCREENS", f"HMI '{device_name}' hat keine Screens.", True)
+        exported = []
+        if ht == "Advanced":
+            for s in all_screens:
+                safe_name = s.Name.replace(" ", "_").replace("/", "_")
+                xml_file = out_dir / f"{safe_name}.xml"
+                if xml_file.exists(): xml_file.unlink()
+                try:
+                    s.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                    exported.append({"screen": s.Name, "path": str(xml_file), "method": "api_export"})
+                except Exception as e:
+                    exported.append({"screen": s.Name, "error": str(e)})
+        else:
+            import shutil as _shutil
+            proj_path = str(_sess.project.Path)
+            screen_files = _unified_screen_files(proj_path)
+            for s in all_screens:
+                name = s.Name
+                if name in screen_files:
+                    src = screen_files[name]
+                    dst = out_dir / src.name
+                    if dst.exists(): dst.unlink()
+                    _shutil.copy2(str(src), str(dst))
+                    exported.append({"screen": name, "path": str(dst), "method": "filesystem_copy"})
+                else:
+                    exported.append({"screen": name,
+                                     "error": "Keine .hmiScreen-Datei — Projekt gespeichert?"})
+        ok_count = len([e for e in exported if "path" in e])
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "exported": exported, "count": ok_count}
+    return sta.run(_tia_call, _run)
+
+def export_hmi_scripts(device_name, output_path=None):
+    """
+    HMI-Scripts exportieren.
+    Unified:            sw.Scripts.Export(DirectoryInfo)
+    Advanced HmiTarget: sw.VBScriptFolder.VBScripts einzeln exportieren
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir = (_export_dir(None) / f"hmi_scripts_{device_name}") \
+                  if not output_path else Path(output_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        exported = []
+
+        # Unified: sw.Scripts
+        scripts = getattr(sw, "Scripts", None)
+        if scripts is not None:
+            if hasattr(scripts, "Export"):
+                files = list(scripts.Export(DirectoryInfo(str(out_dir))))
+                exported = [str(f) for f in files]
+            else:
+                for sc in scripts:
+                    safe_name = sc.Name.replace(" ", "_").replace("/", "_")
+                    if hasattr(sc, "Export"):
+                        xml_file = out_dir / f"{safe_name}.xml"
+                        if xml_file.exists(): xml_file.unlink()
+                        sc.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                        exported.append(str(xml_file))
+
+        # Advanced HmiTarget: sw.VBScriptFolder
+        if not exported and hasattr(sw, "VBScriptFolder"):
+            vbf = sw.VBScriptFolder
+            for sc in vbf.VBScripts:
+                safe_name = sc.Name.replace(" ", "_").replace("/", "_")
+                if hasattr(sc, "Export"):
+                    xml_file = out_dir / f"{safe_name}.xml"
+                    if xml_file.exists(): xml_file.unlink()
+                    sc.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                    exported.append(str(xml_file))
+            for sub in vbf.Folders:
+                for sc in sub.VBScripts:
+                    safe_name = sc.Name.replace(" ", "_").replace("/", "_")
+                    if hasattr(sc, "Export"):
+                        xml_file = out_dir / f"{sub.Name}_{safe_name}.xml"
+                        if xml_file.exists(): xml_file.unlink()
+                        sc.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                        exported.append(str(xml_file))
+
+        if not exported:
+            raise TiaError("NO_SCRIPTS",
+                f"HMI '{device_name}' hat keine Scripts oder Export nicht verfügbar.", True)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "exported": exported, "count": len(exported)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_scripts(device_name, file_path):
+    """HMI-Scripts importieren. Unified: Scripts.Import(DirectoryInfo). Advanced HmiTarget: VBScriptComposition.Import(FileInfo, ImportOptions)."""
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo, DirectoryInfo
+        sw, ht = _get_hmi(device_name)
+        p = Path(file_path)
+        if not p.exists():
+            raise TiaError("FILE_NOT_FOUND", f"Datei/Ordner nicht gefunden: {file_path}", True)
+
+        # Unified: Scripts.Import(DirectoryInfo)
+        scripts = getattr(sw, "Scripts", None)
+        if scripts is not None and hasattr(scripts, "Import"):
+            arg = DirectoryInfo(str(p)) if p.is_dir() else FileInfo(str(p))
+            scripts.Import(arg)
+            return {"status": "ok", "device": device_name, "imported_from": file_path}
+
+        # Advanced HmiTarget: VBScriptComposition.Import(FileInfo, ImportOptions)
+        if hasattr(sw, "VBScriptFolder"):
+            vbf = sw.VBScriptFolder
+            if hasattr(vbf, "VBScripts") and hasattr(vbf.VBScripts, "Import"):
+                imported = []
+                if p.is_dir():
+                    # Alle XML-Dateien im Ordner einzeln importieren
+                    for xml_file in p.glob("*.xml"):
+                        vbf.VBScripts.Import(FileInfo(str(xml_file)), eng.ImportOptions.Override)
+                        imported.append(str(xml_file))
+                else:
+                    vbf.VBScripts.Import(FileInfo(str(p)), eng.ImportOptions.Override)
+                    imported.append(str(p))
+                return {"status": "ok", "device": device_name,
+                        "imported_from": file_path, "files": imported}
+
+        raise TiaError("SCRIPTS_IMPORT_NOT_SUPPORTED",
+            f"Scripts-Import nicht verfügbar für '{device_name}' ({ht}).", False)
+    return sta.run(_tia_call, _run)
+
+
+
 def import_hmi_screen(device_name, file_path):
+    """
+    HMI-Screen importieren.
+    Advanced: existierenden Screen gleichen Namens löschen, dann Import via API.
+    Unified:  ⏭ V21-Limitation — kein Screen-Import via API.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        src = Path(file_path)
+        if not src.exists():
+            raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
+
+        if ht == "Unified":
+            raise TiaError("SCREEN_IMPORT_NOT_SUPPORTED",
+                f"Screen-Import für Unified nicht verfügbar (V21-Limitation).", False,
+                {"hint": "Unified-Screens können nur manuell in TIA Portal importiert werden."})
+
+        # Advanced: Screen-Name aus XML lesen (nicht aus Dateinamen)
+        try:
+            import xml.etree.ElementTree as _et
+            tree = _et.parse(str(src))
+            root = tree.getroot()
+            # TIA XML: <SW.Screens.Screen ... Name="..."> oder Attribut in ObjectList
+            screen_name = None
+            for elem in root.iter():
+                if "Screen" in elem.tag and elem.get("Name"):
+                    screen_name = elem.get("Name")
+                    break
+                # Alternative: AttributeList/Name
+                if elem.tag.endswith("Name") and elem.text:
+                    parent_tag = elem.getparent().tag if hasattr(elem, "getparent") else ""
+                    if "Screen" in parent_tag:
+                        screen_name = elem.text
+                        break
+            # Fallback: alle Children nach Name-Tag suchen
+            if not screen_name:
+                for elem in root.iter():
+                    if elem.tag == "Name" and elem.text:
+                        screen_name = elem.text
+                        break
+        except Exception:
+            screen_name = None
+
+        # Existierenden Screen löschen
+        deleted = []
+        if screen_name:
+            for s in _hmi_screens(sw):
+                if s.Name == screen_name:
+                    s.Delete()
+                    deleted.append(screen_name)
+                    break
+
+        _hmi_screens_import(sw, FileInfo(str(src)), eng)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "imported_from": file_path, "method": "api_import",
+                "deleted_before_import": deleted}
+    return sta.run(_tia_call, _run)
+
+
+def export_hmi_alarms(device_name, output_path=None):
+    """
+    HMI-Alarme als XML exportieren.
+    Gegenstück zu list_hmi_alarms / import_hmi_alarms.
+    output_path: Zieldatei (Standard: C:\\tia-mcp\\export\\hmi_alarms_<device>.xml).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir  = _export_dir(None if output_path and Path(output_path).suffix else output_path)
+        xml_file = Path(output_path) if (output_path and Path(output_path).suffix) \
+                   else out_dir / f"hmi_alarms_{device_name}.xml"
+        xml_file.parent.mkdir(parents=True, exist_ok=True)
+        if xml_file.exists(): xml_file.unlink()
+        # WinCC Advanced: DiscreteAlarms.Export / AnalogAlarms.Export
+        # WinCC Unified:  Alarms.Export
+        exported = False
+        for attr in ("DiscreteAlarms", "AnalogAlarms", "Alarms"):
+            col = getattr(sw, attr, None)
+            if col and hasattr(col, "Export"):
+                col.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+                exported = True
+                break
+        # Fallback: ganzes HMI-Objekt exportieren
+        if not exported and hasattr(sw, "Export"):
+            sw.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+            exported = True
+        if not exported:
+            raise TiaError("ALARM_EXPORT_NOT_SUPPORTED",
+                f"Kein Alarm-Export für HMI '{device_name}' ({ht}) verfügbar.", False)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "xml_path": str(xml_file)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_alarms(device_name, file_path):
+    """
+    HMI-Alarme aus XML importieren.
+    Gegenstück zu export_hmi_alarms.
+    """
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
@@ -799,8 +1755,292 @@ def import_hmi_screen(device_name, file_path):
         fi = FileInfo(file_path)
         if not fi.Exists:
             raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
-        sw.Screens.Import(fi, eng.ImportOptions.Override)
+        imported = False
+        for attr in ("DiscreteAlarms", "AnalogAlarms", "Alarms"):
+            col = getattr(sw, attr, None)
+            if col and hasattr(col, "Import"):
+                col.Import(fi, eng.ImportOptions.Override)
+                imported = True
+                break
+        if not imported:
+            raise TiaError("ALARM_IMPORT_NOT_SUPPORTED",
+                f"Kein Alarm-Import für HMI '{device_name}' ({ht}) verfügbar.", False)
         return {"status": "ok", "device": device_name, "imported_from": file_path}
+    return sta.run(_tia_call, _run)
+
+def export_hmi_textlists(device_name, output_path=None):
+    """
+    HMI-Textlisten als XML exportieren.
+    Gegenstück zu list_hmi_textlists / import_hmi_textlists.
+    output_path: Zieldatei (Standard: C:\\tia-mcp\\export\\hmi_textlists_<device>.xml).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        out_dir  = _export_dir(None if output_path and Path(output_path).suffix else output_path)
+        xml_file = Path(output_path) if (output_path and Path(output_path).suffix) \
+                   else out_dir / f"hmi_textlists_{device_name}.xml"
+        xml_file.parent.mkdir(parents=True, exist_ok=True)
+        if xml_file.exists(): xml_file.unlink()
+        tl = getattr(sw, "TextLists", None)
+        if not tl or not hasattr(tl, "Export"):
+            raise TiaError("TEXTLIST_EXPORT_NOT_SUPPORTED",
+                f"Kein Textlisten-Export für HMI '{device_name}' ({ht}) verfügbar.", False)
+        tl.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+        return {"status": "ok", "device": device_name, "hmi_type": ht,
+                "xml_path": str(xml_file)}
+    return sta.run(_tia_call, _run)
+
+def import_hmi_textlists(device_name, file_path):
+    """
+    HMI-Textlisten aus XML importieren.
+    Gegenstück zu export_hmi_textlists.
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        sw, ht = _get_hmi(device_name)
+        fi = FileInfo(file_path)
+        if not fi.Exists:
+            raise TiaError("FILE_NOT_FOUND", f"Datei nicht gefunden: {file_path}", True)
+        tl = getattr(sw, "TextLists", None)
+        if not tl or not hasattr(tl, "Import"):
+            raise TiaError("TEXTLIST_IMPORT_NOT_SUPPORTED",
+                f"Kein Textlisten-Import für HMI '{device_name}' ({ht}) verfügbar.", False)
+        tl.Import(fi, eng.ImportOptions.Override)
+        return {"status": "ok", "device": device_name, "imported_from": file_path}
+    return sta.run(_tia_call, _run)
+
+def create_hmi_structure(device_name, structure):
+    """
+    Legt Ordner unter Bilder (Screens) und Tag-Tabellen im HMI an.
+    Funktioniert für WinCC Advanced und WinCC Unified.
+
+    structure: dict mit optionalen Keys 'screens' und 'tag_tables'.
+    Jeder Wert ist eine Liste aus Strings oder Dicts {"Ordner": ["Kind1","Kind2"]}.
+
+    Beispiel:
+        {
+          "screens":    ["Start", {"Antriebe": ["Motor1","Motor2"]}, "Pumpen"],
+          "tag_tables": ["Allgemein", {"Antriebe": ["Motoren","Umrichter"]}]
+        }
+    """
+    def _flatten(items):
+        """Gibt Liste von (parent, child_or_None) zurück."""
+        out = []
+        for item in items:
+            if isinstance(item, str):
+                out.append((item, None))
+            elif isinstance(item, dict):
+                for folder, children in item.items():
+                    if not children:
+                        out.append((folder, None))
+                    else:
+                        for child in (children if isinstance(children, list) else [children]):
+                            out.append((folder, child))
+        return out
+
+    def _ensure(collection, name, child_attr):
+        """Gibt Ordner zurück, legt ihn an falls nötig."""
+        for f in collection:
+            if f.Name == name:
+                return f
+        return collection.Create(name)
+
+    def _run():
+        _sess.ensure_project()
+        sw, ht = _get_hmi(device_name)
+        created = {"screens": [], "tag_tables": []}
+        errors  = []
+
+        # ── Bilder / Screens ────────────────────────────────────────────────
+        screen_items = structure.get("screens", [])
+        if screen_items:
+            folders, ftype = _hmi_screen_folders(sw)
+            if folders is None:
+                errors.append("Screen-Ordner nicht unterstützt auf diesem HMI-Typ.")
+            else:
+                # Unterordner-Attribut je nach Typ
+                sub_attr = ftype  # "ScreenGroups" oder "ScreenFolders"
+                for parent, child in _flatten(screen_items):
+                    try:
+                        pf = _ensure(folders, parent, sub_attr)
+                        entry = f"{parent}"
+                        if child:
+                            sub = getattr(pf, sub_attr, None)
+                            if sub is not None:
+                                _ensure(sub, child, sub_attr)
+                                entry = f"{parent}/{child}"
+                            else:
+                                errors.append(f"Unterordner '{parent}/{child}': "
+                                              f"keine Sub-Collection ({sub_attr}) gefunden.")
+                        if entry not in created["screens"]:
+                            created["screens"].append(entry)
+                    except Exception as e:
+                        errors.append(f"Screen-Ordner '{parent}': {e}")
+
+        # ── Tag-Tabellen ─────────────────────────────────────────────────────
+        tag_items = structure.get("tag_tables", [])
+        if tag_items:
+            tag_root, ttype = _hmi_tag_folders(sw)
+            if tag_root is None:
+                errors.append("Tag-Tabellen-Ordner nicht unterstützt auf diesem HMI-Typ.")
+            else:
+                # Advanced V21: TagTableGroups ist die Root-Collection
+                # Advanced älter / Unified: TagTableGroup ist ein einzelnes Root-Objekt
+                #   dessen Unterordner über .TagTableGroups erreichbar sind
+                if ttype == "TagTableGroups":
+                    root_coll = tag_root          # direkt iterable Collection
+                    sub_attr  = "TagTableGroups"
+                else:
+                    # TagTableGroup (singular) → Unterordner via .TagTableGroups
+                    root_coll = getattr(tag_root, "TagTableGroups", None)
+                    sub_attr  = "TagTableGroups"
+                    if root_coll is None:
+                        errors.append("TagTableGroup hat keine TagTableGroups-Unterordner.")
+                        root_coll = []
+
+                for parent, child in _flatten(tag_items):
+                    try:
+                        pf = _ensure(root_coll, parent, sub_attr)
+                        entry = f"{parent}"
+                        if child:
+                            sub = getattr(pf, sub_attr, None)
+                            if sub is not None:
+                                _ensure(sub, child, sub_attr)
+                                entry = f"{parent}/{child}"
+                            else:
+                                errors.append(f"Unterordner '{parent}/{child}': "
+                                              f"keine Sub-Collection gefunden.")
+                        if entry not in created["tag_tables"]:
+                            created["tag_tables"].append(entry)
+                    except Exception as e:
+                        errors.append(f"Tag-Tabellen-Ordner '{parent}': {e}")
+
+        return {
+            "status":  "ok" if not errors else "partial",
+            "device":  device_name,
+            "hmi_type": ht,
+            "created": created,
+            "errors":  errors,
+        }
+    return sta.run(_tia_call, _run)
+
+def set_plc_block_source(device_name, block_name, scl_source):
+    """
+    SCL-Quellcode direkt als String in einen Baustein schreiben und importieren.
+    Gegenstück zu get_plc_block_source.
+    scl_source: SCL-Code als String — wird als temporäre XML-Datei verpackt und importiert.
+    Voraussetzung: Baustein muss bereits existieren (gleicher Name, gleicher Typ).
+    """
+    def _run():
+        _sess.ensure_project()
+        import Siemens.Engineering as eng
+        from System.IO import FileInfo
+        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
+        if not plc:
+            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+        block = _find_block(plc, block_name)
+        if not block:
+            avail = [b.Name for b in plc.BlockGroup.Blocks]
+            raise TiaError("BLOCK_NOT_FOUND", f"Baustein '{block_name}' nicht gefunden.", True,
+                           {"available": avail})
+        lang = str(getattr(block, "ProgrammingLanguage", ""))
+        if "SCL" not in lang.upper() and "StructuredControlLanguage" not in lang:
+            raise TiaError("WRONG_LANGUAGE",
+                f"Baustein '{block_name}' ist {lang}, kein SCL — set_plc_block_source nur für SCL.", True)
+
+        # Aktuelles XML exportieren und SCL-Body ersetzen
+        out_dir  = _export_dir()
+        xml_file = out_dir / f"{block_name}_set.xml"
+        if xml_file.exists(): xml_file.unlink()
+        block.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
+        xml_content = xml_file.read_text(encoding="utf-8")
+
+        import re as _re
+
+        # Höchste vorhandene UId im XML ermitteln
+        existing_uids = [int(u) for u in _re.findall(r'UId="(\d+)"', xml_content)]
+        uid_start = max(existing_uids) + 1 if existing_uids else 100
+
+        def _scl_to_tokens(code: str, uid: int) -> str:
+            """SCL-Code zeilenweise in Token-Elemente mit UId umwandeln."""
+            def esc(s):
+                return (s.replace("&", "&amp;")
+                          .replace("<", "&lt;")
+                          .replace(">", "&gt;")
+                          .replace('"', "&quot;")
+                          .replace("\r\n", "&#xD;&#xA;")
+                          .replace("\n",   "&#xD;&#xA;")
+                          .replace("\r",   "&#xD;&#xA;"))
+            parts = []
+            for line in code.splitlines(keepends=True):
+                e = esc(line)
+                if e:
+                    parts.append(f'<Token Text="{e}" UId="{uid}" />')
+                    uid += 1
+            return "\n              ".join(parts)
+
+        new_xml  = xml_content
+        replaced = False
+        token_xml = _scl_to_tokens(scl_source, uid_start)
+
+        # V21 Self-Closing: <StructuredText ... />
+        sc_pat = r'<StructuredText(\b[^>]*)\/>'
+        m_sc   = _re.search(sc_pat, new_xml)
+        if m_sc:
+            attrs = m_sc.group(1)
+            replacement = f'<StructuredText{attrs}>\n              {token_xml}\n            </StructuredText>'
+            new_xml = _re.sub(sc_pat, replacement, new_xml, count=1)
+            replaced = True
+
+        # V21 Container mit vorhandenen Tokens ersetzen
+        if not replaced:
+            cont_pat = r'(<StructuredText\b[^>]*>)(.*?)(</StructuredText>)'
+            if _re.search(cont_pat, new_xml, _re.DOTALL):
+                new_xml = _re.sub(cont_pat,
+                    lambda m: m.group(1) + f'\n              {token_xml}\n            ' + m.group(3),
+                    new_xml, flags=_re.DOTALL, count=1)
+                replaced = True
+
+        # V19/V20 Fallback
+        if not replaced:
+            for tag in ["Body", "SourceText"]:
+                pat = rf"(<{tag}[^>]*>)(.*?)(</{tag}>)"
+                if _re.search(pat, new_xml, _re.DOTALL):
+                    new_xml = _re.sub(pat,
+                        lambda x: x.group(1) + scl_source + x.group(3),
+                        new_xml, flags=_re.DOTALL)
+                    replaced = True
+                    break
+
+        if not replaced:
+            raise TiaError("SCL_TAG_NOT_FOUND",
+                f"Kein SCL-Tag in XML von '{block_name}' gefunden.", False)
+
+        xml_file.write_text(new_xml, encoding="utf-8")
+
+        # Import — Baustein liegt ggf. in Untergruppe
+        def _find_group(plc_sw, bname):
+            stack = [plc_sw.BlockGroup]
+            while stack:
+                grp = stack.pop()
+                for b in grp.Blocks:
+                    if b.Name == bname:
+                        return grp
+                for sub in grp.Groups:
+                    stack.append(sub)
+            return plc_sw.BlockGroup
+
+        target_group = _find_group(plc, block_name)
+        result = target_group.Blocks.Import(FileInfo(str(xml_file)), eng.ImportOptions.Override)
+        _log("plc").info(f"SCL gesetzt: {block_name}")
+        return {"status": "ok", "block": block_name, "language": lang,
+                "xml_path": str(xml_file),
+                "blocks": [str(b) for b in result] if result else []}
     return sta.run(_tia_call, _run)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -841,12 +2081,36 @@ def compile_plc(device_name):
         if not plc:
             raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
 
-        # ICompilable per Reflection — funktioniert zuverlässig in V21
-        compilable_type = plc.GetType().Assembly.GetType(
-            "Siemens.Engineering.Compiler.ICompilable")
+        # ICompilable liegt in V21 in Siemens.Engineering.Base (Compiler-Namespace).
+        # Strategie: alle geladenen Assemblies nach dem Typ durchsuchen.
+        compilable_type = None
+        step7_asm = plc.GetType().Assembly
+        # 1) Direkt aus Step7-Assembly
+        compilable_type = step7_asm.GetType("Siemens.Engineering.Compiler.ICompilable")
+        # 2) Aus Base-Assembly (referenziert von Step7)
+        if not compilable_type:
+            for ref in step7_asm.GetReferencedAssemblies():
+                if "Base" in str(ref.Name):
+                    try:
+                        import System.Reflection as refl
+                        base_asm = refl.Assembly.Load(ref)
+                        compilable_type = base_asm.GetType(
+                            "Siemens.Engineering.Compiler.ICompilable")
+                        if compilable_type:
+                            break
+                    except Exception:
+                        pass
+        # 3) Fallback: Namespace direkt importieren
+        if not compilable_type:
+            try:
+                from Siemens.Engineering.Compiler import ICompilable
+                compilable_type = ICompilable
+            except Exception:
+                pass
+
         if not compilable_type:
             raise TiaError("COMPILE_NOT_SUPPORTED",
-                "ICompilable nicht gefunden — TIA Version pruefen.", False)
+                "ICompilable nicht gefunden — Siemens.Engineering.Base.dll pruefen.", False)
 
         compiler = plc.GetService[compilable_type]()
         if not compiler:
@@ -862,913 +2126,18 @@ def compile_plc(device_name):
         try:
             for msg in result.Messages:
                 messages.append({
-                    "severity": str(msg.Severity),
+                    "severity":    str(msg.Severity),
                     "description": str(msg.Description),
-                    "path": str(getattr(msg, "Path", ""))
+                    "path":        str(getattr(msg, "Path", ""))
                 })
-        except Exception: pass
+        except Exception:
+            pass
 
         return {
             "status":   status,
             "device":   device_name,
             "errors":   result.ErrorCount,
             "warnings": result.WarningCount,
-            "messages": messages[:20]   # max 20 Meldungen
+            "messages": messages[:20]
         }
-    return sta.run(_tia_call, _run)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PLC LESEN — Bausteine, Tag-Tabellen, Tags
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def list_plc_blocks(device_name, group_path=None):
-    """
-    Alle Bausteine der PLC als JSON — ohne Export, direkt aus dem Objektmodell.
-
-    group_path: optional, z.B. "Antriebe" oder "Antriebe/Pumpen".
-                Leer = alle Gruppen rekursiv.
-
-    Rueckgabe je Baustein: name, number, type (OB/FC/FB/DB/UDT), language, path
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Startgruppe ermitteln — optional auf Unterordner einschraenken
-        start_group = plc.BlockGroup
-        if group_path:
-            for part in group_path.strip("/").split("/"):
-                found = None
-                for sub in start_group.Groups:
-                    if sub.Name == part:
-                        found = sub
-                        break
-                if not found:
-                    avail = [g.Name for g in start_group.Groups]
-                    raise TiaError("GROUP_NOT_FOUND",
-                        f"Gruppe '{part}' in '{group_path}' nicht gefunden.", True,
-                        {"available": avail})
-                start_group = found
-
-        # Klassenname → lesbarer Typ
-        type_map = {
-            "DataBlock":          "DB",
-            "PlcType":            "UDT",
-            "PlcTypeComposition": "UDT",
-        }
-
-        blocks = []
-        stack  = [(start_group, group_path or "")]
-        while stack:
-            group, path = stack.pop()
-            for block in group.Blocks:
-                raw_type   = type(block).__name__
-                block_type = type_map.get(raw_type, raw_type)
-                language   = getattr(block, "ProgrammingLanguage", None)
-                blocks.append({
-                    "name":     block.Name,
-                    "number":   getattr(block, "Number", None),
-                    "type":     block_type,
-                    "language": str(language) if language is not None else None,
-                    "path":     path,
-                })
-            for sub in group.Groups:
-                sub_path = f"{path}/{sub.Name}".lstrip("/")
-                stack.append((sub, sub_path))
-
-        _log("plc").info(f"list_plc_blocks {device_name}: {len(blocks)} Bausteine")
-        return {
-            "status":       "ok",
-            "device":       device_name,
-            "group_filter": group_path,
-            "blocks":       blocks,
-            "count":        len(blocks),
-        }
-    return sta.run(_tia_call, _run)
-
-
-def list_plc_tag_tables(device_name):
-    """
-    Alle PLC Tag-Tabellen mit Name und Tag-Anzahl.
-    Vorstufe zu list_plc_tags / export_plc_tagtable.
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        tables = []
-        stack  = [(plc.TagTableGroup, "")]
-        while stack:
-            group, path = stack.pop()
-            for table in group.TagTables:
-                try:    tag_count = table.Tags.Count
-                except: tag_count = None
-                tables.append({
-                    "name":      table.Name,
-                    "path":      path,
-                    "tag_count": tag_count,
-                })
-            try:
-                for sub in group.Groups:
-                    stack.append((sub, f"{path}/{sub.Name}".lstrip("/")))
-            except Exception:
-                pass
-
-        _log("plc").info(f"list_plc_tag_tables {device_name}: {len(tables)} Tabellen")
-        return {"status": "ok", "device": device_name, "tables": tables, "count": len(tables)}
-    return sta.run(_tia_call, _run)
-
-
-def list_plc_tags(device_name, table_name=None):
-    """
-    PLC-Tags direkt als JSON — ohne XML-Export.
-
-    table_name: optional. Leer = alle Tabellen.
-
-    Rueckgabe je Tag: name, data_type, logical_address, comment, table
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Alle Tabellennamen vorab sammeln (fuer Fehlerfall)
-        all_table_names = []
-        tags = []
-
-        stack = [(plc.TagTableGroup, "")]
-        while stack:
-            group, path = stack.pop()
-            for table in group.TagTables:
-                all_table_names.append(table.Name)
-                if table_name and table.Name != table_name:
-                    continue
-                for tag in table.Tags:
-                    # Kommentar: MultilingualText — erste Sprache lesen
-                    comment = None
-                    try:
-                        ml = tag.Comment
-                        if ml and ml.Items.Count > 0:
-                            comment = str(ml.Items[0].Text)
-                    except Exception:
-                        pass
-                    tags.append({
-                        "name":            tag.Name,
-                        "data_type":       str(getattr(tag, "DataTypeName", "?")),
-                        "logical_address": str(getattr(tag, "LogicalAddress", "") or ""),
-                        "comment":         comment,
-                        "table":           table.Name,
-                    })
-            try:
-                for sub in group.Groups:
-                    stack.append((sub, f"{path}/{sub.Name}".lstrip("/")))
-            except Exception:
-                pass
-
-        if table_name and table_name not in all_table_names:
-            raise TiaError("TABLE_NOT_FOUND",
-                f"Tag-Tabelle '{table_name}' nicht gefunden.", True,
-                {"available": all_table_names})
-
-        _log("plc").info(
-            f"list_plc_tags {device_name}"
-            f"{f'/{table_name}' if table_name else ''}: {len(tags)} Tags")
-        return {
-            "status":       "ok",
-            "device":       device_name,
-            "table_filter": table_name,
-            "tags":         tags,
-            "count":        len(tags),
-        }
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROJEKT SPEICHERN
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def save_project():
-    """Aktuelles Projekt speichern — explizit statt per execute_openness."""
-    def _run():
-        _sess.ensure_project()
-        name = _sess.project.Name
-        path = str(_sess.project.Path)
-        _sess.project.Save()
-        _log("session").info(f"Projekt gespeichert: {name}")
-        return {"status": "ok", "project": name, "path": path}
-    return sta.run(_tia_call, _run)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BIBLIOTHEK — Öffnen, Suchen
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def find_libraries(folder):
-    """
-    Durchsucht einen Ordner nach globalen TIA-Bibliotheken (.al*).
-    Gibt Name, Pfad und erkannte TIA-Version zurück.
-    Hilfreich um die richtige Bibliotheksdatei für die aktuelle TIA-Version zu finden.
-    """
-    import re
-    p = Path(folder)
-    if not p.exists():
-        raise TiaError("FOLDER_NOT_FOUND", f"Ordner nicht gefunden: {folder}", True)
-
-    result = []
-    # .al18 / .al19 / .al20 / .al21 usw.
-    for f in sorted(p.glob("*.al*")):
-        m = re.search(r"\.al(\d+)$", f.suffix, re.IGNORECASE)
-        if m:
-            ver = f"V{m.group(1)}"
-            result.append({
-                "name":    f.stem,
-                "path":    str(f),
-                "version": ver,
-                "match":   ver == _sess.tia_version,  # passt zur laufenden TIA-Version
-            })
-
-    _log("library").info(f"find_libraries {folder}: {len(result)} Bibliotheken")
-    return {
-        "status":        "ok",
-        "folder":        folder,
-        "tia_version":   _sess.tia_version,
-        "libraries":     result,
-        "count":         len(result),
-    }
-
-
-def open_library(path_or_folder, name_hint=None):
-    """
-    Öffnet eine globale TIA-Bibliothek.
-
-    path_or_folder:
-        Vollständiger Dateipfad (.al21 etc.) — wird direkt geöffnet.
-        Oder Ordnerpfad — sucht automatisch die Datei die zur
-        laufenden TIA-Version passt. name_hint hilft bei mehreren Treffer.
-
-    name_hint: optionaler Teilname z.B. "Antriebe" um bei mehreren
-               Bibliotheken im Ordner die richtige zu wählen.
-    """
-    def _run():
-        _sess.ensure_portal()
-        from System.IO import FileInfo
-        import re
-
-        p = Path(path_or_folder)
-
-        # Vollständiger Dateipfad — direkt öffnen
-        if p.is_file():
-            target = p
-        else:
-            # Ordner — passende Version suchen
-            if not p.is_dir():
-                raise TiaError("PATH_NOT_FOUND",
-                    f"Pfad nicht gefunden: {path_or_folder}", True)
-
-            ver_num = _sess.tia_version.lstrip("V") if _sess.tia_version else ""
-            pattern = f"*.al{ver_num}" if ver_num else "*.al*"
-            candidates = list(p.glob(pattern))
-
-            if not candidates:
-                # Fallback: alle .al* Dateien
-                candidates = [f for f in p.glob("*.al*")
-                              if re.search(r"\.al\d+$", f.suffix, re.IGNORECASE)]
-
-            if name_hint:
-                candidates = [f for f in candidates
-                              if name_hint.lower() in f.stem.lower()]
-
-            if not candidates:
-                raise TiaError("LIBRARY_NOT_FOUND",
-                    f"Keine passende Bibliothek in {path_or_folder} "
-                    f"für TIA {_sess.tia_version} gefunden.", True,
-                    {"searched": pattern, "hint": name_hint})
-
-            if len(candidates) > 1:
-                raise TiaError("LIBRARY_AMBIGUOUS",
-                    f"Mehrere Bibliotheken gefunden — name_hint angeben.",
-                    True, {"found": [str(c) for c in candidates]})
-
-            target = candidates[0]
-
-        # Prüfen ob bereits geöffnet
-        for gl in _sess.portal.GlobalLibraries:
-            if Path(str(gl.Path)) == target:
-                _log("library").info(f"Bibliothek bereits offen: {target.name}")
-                return {"status": "ok", "name": gl.Name,
-                        "path": str(target), "already_open": True}
-
-        lib = _sess.portal.GlobalLibraries.Open(FileInfo(str(target)))
-        _log("library").info(f"Bibliothek geöffnet: {target.name}")
-        return {
-            "status":       "ok",
-            "name":         lib.Name,
-            "path":         str(target),
-            "already_open": False,
-            "types":        lib.TypeFolder.Types.Count,
-            "copies":       lib.MasterCopyFolder.MasterCopies.Count,
-        }
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# UDTs lesen
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def list_plc_udts(device_name):
-    """
-    Alle UDTs (PlcType) der PLC als JSON mit vollständiger Memberstruktur.
-    Felder je Member: name, data_type, default_value, comment, offset
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        udts = []
-        stack = [(plc.BlockGroup, "")]
-        while stack:
-            group, path = stack.pop()
-            for block in group.Blocks:
-                # PlcType = UDT, PlcTypeComposition = strukturierter UDT
-                raw = type(block).__name__
-                if "PlcType" not in raw:
-                    continue
-
-                members = []
-                try:
-                    for m in block.Interface.Members:
-                        comment = None
-                        try:
-                            ml = m.Comment
-                            if ml and ml.Items.Count > 0:
-                                comment = str(ml.Items[0].Text)
-                        except Exception:
-                            pass
-                        members.append({
-                            "name":          m.Name,
-                            "data_type":     str(getattr(m, "Datatype", "?")),
-                            "default_value": str(getattr(m, "StartValue", "") or ""),
-                            "comment":       comment,
-                            "offset":        str(getattr(m, "Offset", "") or ""),
-                        })
-                except Exception as e:
-                    members = [{"error": str(e)}]
-
-                udts.append({
-                    "name":    block.Name,
-                    "number":  getattr(block, "Number", None),
-                    "path":    path,
-                    "members": members,
-                    "member_count": len(members),
-                })
-
-            for sub in group.Groups:
-                stack.append((sub, f"{path}/{sub.Name}".lstrip("/")))
-
-        _log("plc").info(f"list_plc_udts {device_name}: {len(udts)} UDTs")
-        return {
-            "status": "ok",
-            "device": device_name,
-            "udts":   udts,
-            "count":  len(udts),
-        }
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Bibliothekstyp in PLC instanziieren
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def use_library_type(device_name, library_name, type_name, group_path=None):
-    """
-    Instanziiert einen Bibliothekstyp (UDT, FB, FC) im PLC.
-    Verwendet die Standardversion des Typs.
-
-    group_path: optionaler Zielordner im PLC, z.B. "Antriebe".
-                Leer = BlockGroup (Wurzel).
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Zielgruppe ermitteln
-        target_group = plc.BlockGroup
-        if group_path:
-            for part in group_path.strip("/").split("/"):
-                found = None
-                for sub in target_group.Groups:
-                    if sub.Name == part:
-                        found = sub
-                        break
-                if not found:
-                    # Gruppe anlegen wenn nicht vorhanden
-                    found = target_group.Groups.Create(part)
-                    _log("plc").info(f"Gruppe angelegt: {part}")
-                target_group = found
-
-        # Bibliothek suchen (Projekt + global)
-        lib, scope = _find_lib(library_name)
-
-        # Typ suchen
-        types_list = []
-        _collect_types(lib.TypeFolder, types_list)
-        match = next((t for t in types_list if t["name"] == type_name), None)
-        if not match:
-            raise TiaError("TYPE_NOT_FOUND",
-                f"Typ '{type_name}' in Bibliothek '{library_name}' nicht gefunden.", True,
-                {"available": [t["name"] for t in types_list]})
-
-        # Typ-Objekt aus Bibliothek holen und Standardversion instanziieren
-        def _find_type_obj(folder):
-            for t in folder.Types:
-                if t.Name == type_name:
-                    return t
-            for sub in folder.Folders:
-                r = _find_type_obj(sub)
-                if r: return r
-            return None
-
-        type_obj = _find_type_obj(lib.TypeFolder)
-        if not type_obj:
-            raise TiaError("TYPE_NOT_FOUND",
-                f"Typ '{type_name}' nicht gefunden.", True)
-
-        version = type_obj.DefaultVersion
-        if not version:
-            raise TiaError("NO_DEFAULT_VERSION",
-                f"Typ '{type_name}' hat keine Standardversion.", True)
-
-        # In Zielgruppe instanziieren
-        target_group.Blocks.CreateFrom(version)
-        _log("plc").info(
-            f"Typ '{type_name}' v{match['default_version']} "
-            f"aus '{library_name}' in '{device_name}/{group_path or ''}' instanziiert")
-
-        return {
-            "status":   "ok",
-            "device":   device_name,
-            "library":  library_name,
-            "type":     type_name,
-            "version":  match["default_version"],
-            "group":    group_path or "(root)",
-        }
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PLC-Tags anlegen / schreiben
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def create_plc_tag(device_name, table_name, tag_name,
-                   data_type, address=None, comment=None):
-    """
-    Einzelnen PLC-Tag anlegen.
-    table_name: Tabelle muss existieren (vorher list_plc_tag_tables prüfen).
-    data_type:  z.B. "Bool", "Int", "Real", "DWord", "UDT_Antrieb"
-    address:    z.B. "%M0.0", "%MW10" — optional
-    comment:    optional
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Tabelle suchen
-        table = None
-        stack = [(plc.TagTableGroup, "")]
-        while stack:
-            group, _ = stack.pop()
-            for t in group.TagTables:
-                if t.Name == table_name:
-                    table = t
-                    break
-            if table:
-                break
-            try:
-                for sub in group.Groups:
-                    stack.append((sub, ""))
-            except Exception:
-                pass
-
-        if not table:
-            raise TiaError("TABLE_NOT_FOUND",
-                f"Tag-Tabelle '{table_name}' nicht gefunden.", True)
-
-        tag = table.Tags.Create(tag_name, data_type)
-
-        if address:
-            tag.LogicalAddress = address
-
-        if comment:
-            try:
-                tag.Comment.Items[0].Text = comment
-            except Exception:
-                pass
-
-        _log("plc").info(f"PLC-Tag angelegt: {table_name}.{tag_name} ({data_type})")
-        return {
-            "status":    "ok",
-            "device":    device_name,
-            "table":     table_name,
-            "tag":       tag_name,
-            "data_type": data_type,
-            "address":   address,
-            "comment":   comment,
-        }
-    return sta.run(_tia_call, _run)
-
-
-def create_plc_tag_table(device_name, table_name):
-    """
-    Neue PLC Tag-Tabelle anlegen.
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        table = plc.TagTableGroup.TagTables.Create(table_name)
-        _log("plc").info(f"Tag-Tabelle angelegt: {table_name}")
-        return {"status": "ok", "device": device_name, "table": table_name}
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# HMI-Tags anlegen / schreiben
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def create_hmi_tag(device_name, table_name, tag_name, data_type,
-                   plc_tag=None, high_limit=None, low_limit=None,
-                   logging_enabled=False, comment=None):
-    """
-    Einzelnen HMI-Tag anlegen.
-    table_name:      Tabelle muss existieren.
-    data_type:       z.B. "Int", "Real", "Bool"
-    plc_tag:         Verknüpfung mit PLC-Tag, z.B. "PLC_1.DB1.Motor1_Drehzahl"
-    high_limit:      oberer Grenzwert (für analoge Tags)
-    low_limit:       unterer Grenzwert
-    logging_enabled: Archivierung ein/aus
-    comment:         optional
-    """
-    def _run():
-        _sess.ensure_project()
-
-        sw, ht = _get_hmi(device_name)
-
-        # Tabelle suchen
-        table = None
-        for t in sw.TagTableGroup.TagTables:
-            if t.Name == table_name:
-                table = t
-                break
-
-        if not table:
-            raise TiaError("TABLE_NOT_FOUND",
-                f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True,
-                {"available": [t.Name for t in sw.TagTableGroup.TagTables]})
-
-        tag = table.Tags.Create(tag_name, data_type)
-
-        if plc_tag:
-            try:
-                tag.PlcTag = plc_tag
-            except Exception:
-                pass
-
-        if high_limit is not None:
-            try:
-                tag.HighLimit = high_limit
-            except Exception:
-                pass
-
-        if low_limit is not None:
-            try:
-                tag.LowLimit = low_limit
-            except Exception:
-                pass
-
-        try:
-            tag.LoggingEnabled = logging_enabled
-        except Exception:
-            pass
-
-        if comment:
-            try:
-                tag.Comment = comment
-            except Exception:
-                pass
-
-        _log("hmi").info(
-            f"HMI-Tag angelegt: {device_name}/{table_name}.{tag_name} ({data_type})")
-        return {
-            "status":           "ok",
-            "device":           device_name,
-            "hmi_type":         ht,
-            "table":            table_name,
-            "tag":              tag_name,
-            "data_type":        data_type,
-            "plc_tag":          plc_tag,
-            "high_limit":       high_limit,
-            "low_limit":        low_limit,
-            "logging_enabled":  logging_enabled,
-        }
-    return sta.run(_tia_call, _run)
-
-
-def create_hmi_tag_table(device_name, table_name):
-    """
-    Neue HMI Tag-Tabelle anlegen.
-    """
-    def _run():
-        _sess.ensure_project()
-        sw, ht = _get_hmi(device_name)
-        sw.TagTableGroup.TagTables.Create(table_name)
-        _log("hmi").info(f"HMI Tag-Tabelle angelegt: {device_name}/{table_name}")
-        return {"status": "ok", "device": device_name,
-                "hmi_type": ht, "table": table_name}
-    return sta.run(_tia_call, _run)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# QUERVERWEISE & UNGENUTZTE TAGS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def get_cross_references(device_name, symbol):
-    """
-    Alle Verwendungsstellen eines Symbols (Tag, Baustein, DB-Variable) in der PLC.
-
-    symbol: z.B. "Motor1_Start", "FB_Antrieb", "DB1", "UDT_Antrieb"
-
-    Rückgabe je Treffer:
-        block, block_type, language, usage (Read/Write/ReadWrite/Call), location
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        refs = []
-        try:
-            xref_data = plc.CrossReferenceData
-            # Alle Querverweise durchsuchen
-            for item in xref_data:
-                try:
-                    # Symbol-Name prüfen
-                    sym = str(getattr(item, "Symbol", "") or "")
-                    name = str(getattr(item, "Name", "") or "")
-                    if symbol.lower() not in sym.lower() and \
-                       symbol.lower() not in name.lower():
-                        continue
-
-                    refs.append({
-                        "block":      str(getattr(item, "BlockName",    "") or ""),
-                        "block_type": str(getattr(item, "BlockType",    "") or ""),
-                        "language":   str(getattr(item, "Language",     "") or ""),
-                        "usage":      str(getattr(item, "UseType",      "") or ""),
-                        "location":   str(getattr(item, "Location",     "") or ""),
-                        "symbol":     sym or name,
-                    })
-                except Exception:
-                    pass
-        except Exception as e:
-            # Fallback: CrossReferenceData nicht verfügbar
-            raise TiaError("XREF_NOT_AVAILABLE",
-                f"Querverweise nicht verfügbar: {e}", False,
-                {"hint": "TIA Portal muss kompiliert sein"})
-
-        _log("plc").info(
-            f"get_cross_references {device_name}/{symbol}: {len(refs)} Treffer")
-        return {
-            "status":  "ok",
-            "device":  device_name,
-            "symbol":  symbol,
-            "refs":    refs,
-            "count":   len(refs),
-        }
-    return sta.run(_tia_call, _run)
-
-
-def find_unused_plc_tags(device_name):
-    """
-    Findet alle PLC-Tags die in keinem Baustein verwendet werden.
-    Nutzt CrossReferenceData — PLC muss kompiliert sein.
-
-    Rückgabe je ungenutztem Tag:
-        name, data_type, logical_address, table
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Alle verwendeten Symbolnamen aus CrossReferenceData sammeln
-        used_symbols = set()
-        try:
-            for item in plc.CrossReferenceData:
-                try:
-                    sym = str(getattr(item, "Symbol", "") or "")
-                    if sym:
-                        used_symbols.add(sym.lower())
-                except Exception:
-                    pass
-        except Exception as e:
-            raise TiaError("XREF_NOT_AVAILABLE",
-                f"Querverweise nicht verfügbar: {e}", False,
-                {"hint": "Erst compile_plc aufrufen"})
-
-        # Alle Tags durchgehen und mit used_symbols vergleichen
-        unused = []
-        stack = [(plc.TagTableGroup, "")]
-        while stack:
-            group, _ = stack.pop()
-            for table in group.TagTables:
-                for tag in table.Tags:
-                    if tag.Name.lower() not in used_symbols:
-                        unused.append({
-                            "name":            tag.Name,
-                            "data_type":       str(getattr(tag, "DataTypeName", "?")),
-                            "logical_address": str(getattr(tag, "LogicalAddress", "") or ""),
-                            "table":           table.Name,
-                        })
-            try:
-                for sub in group.Groups:
-                    stack.append((sub, ""))
-            except Exception:
-                pass
-
-        _log("plc").info(
-            f"find_unused_plc_tags {device_name}: {len(unused)} ungenutzte Tags")
-        return {
-            "status":  "ok",
-            "device":  device_name,
-            "unused":  unused,
-            "count":   len(unused),
-            "hint":    "Bitte Liste prüfen bevor delete_plc_tag aufgerufen wird.",
-        }
-    return sta.run(_tia_call, _run)
-
-
-def find_unused_hmi_tags(device_name):
-    """
-    Findet alle HMI-Tags die in keinem Screen verwendet werden.
-    Gibt Name, Datentyp und Tabelle zurück.
-
-    Hinweis: HMI-Querverweise sind über CrossReferenceData des HMI-Objekts
-    verfügbar — Verfügbarkeit hängt vom HMI-Typ ab.
-    """
-    def _run():
-        _sess.ensure_project()
-        sw, ht = _get_hmi(device_name)
-
-        # Verwendete Tags aus HMI-CrossReferenceData
-        used_symbols = set()
-        try:
-            for item in sw.CrossReferenceData:
-                try:
-                    sym = str(getattr(item, "Symbol", "") or "")
-                    name = str(getattr(item, "Name",   "") or "")
-                    s = sym or name
-                    if s:
-                        used_symbols.add(s.lower())
-                except Exception:
-                    pass
-        except Exception:
-            # Fallback: CrossReferenceData nicht verfügbar beim HMI-Typ
-            # In diesem Fall alle Tags als "potenziell ungenutzt" melden
-            _log("hmi").warning(
-                f"HMI CrossReferenceData nicht verfügbar für {device_name} "
-                f"({ht}) — alle Tags werden gelistet")
-
-        unused = []
-        for table in sw.TagTableGroup.TagTables:
-            for tag in table.Tags:
-                if not used_symbols or tag.Name.lower() not in used_symbols:
-                    unused.append({
-                        "name":      tag.Name,
-                        "data_type": str(getattr(tag, "DataTypeName", "?")),
-                        "table":     table.Name,
-                        "verified":  bool(used_symbols),  # False = CrossRef nicht verfügbar
-                    })
-
-        _log("hmi").info(
-            f"find_unused_hmi_tags {device_name}: {len(unused)} Tags")
-        return {
-            "status":   "ok",
-            "device":   device_name,
-            "hmi_type": ht,
-            "unused":   unused,
-            "count":    len(unused),
-            "verified": bool(used_symbols),
-            "hint":     "verified=false bedeutet CrossReferenceData nicht verfügbar "
-                        "— manuelle Prüfung empfohlen vor dem Löschen.",
-        }
-    return sta.run(_tia_call, _run)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAGS LÖSCHEN
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def delete_plc_tag(device_name, table_name, tag_name):
-    """
-    Einzelnen PLC-Tag löschen.
-    Vorher find_unused_plc_tags aufrufen und Liste prüfen!
-    """
-    def _run():
-        _sess.ensure_project()
-        import Siemens.Engineering as eng
-
-        plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
-        if not plc:
-            raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
-
-        # Tabelle und Tag suchen
-        stack = [(plc.TagTableGroup, "")]
-        while stack:
-            group, _ = stack.pop()
-            for table in group.TagTables:
-                if table.Name == table_name:
-                    for tag in table.Tags:
-                        if tag.Name == tag_name:
-                            tag.Delete()
-                            _log("plc").info(
-                                f"PLC-Tag gelöscht: {table_name}.{tag_name}")
-                            return {
-                                "status": "ok",
-                                "device": device_name,
-                                "table":  table_name,
-                                "tag":    tag_name,
-                            }
-                    raise TiaError("TAG_NOT_FOUND",
-                        f"Tag '{tag_name}' in Tabelle '{table_name}' nicht gefunden.",
-                        True)
-            try:
-                for sub in group.Groups:
-                    stack.append((sub, ""))
-            except Exception:
-                pass
-
-        raise TiaError("TABLE_NOT_FOUND",
-            f"Tag-Tabelle '{table_name}' nicht gefunden.", True)
-    return sta.run(_tia_call, _run)
-
-
-def delete_hmi_tag(device_name, table_name, tag_name):
-    """
-    Einzelnen HMI-Tag löschen.
-    Vorher find_unused_hmi_tags aufrufen und Liste prüfen!
-    """
-    def _run():
-        _sess.ensure_project()
-        sw, ht = _get_hmi(device_name)
-
-        for table in sw.TagTableGroup.TagTables:
-            if table.Name == table_name:
-                for tag in table.Tags:
-                    if tag.Name == tag_name:
-                        tag.Delete()
-                        _log("hmi").info(
-                            f"HMI-Tag gelöscht: {device_name}/{table_name}.{tag_name}")
-                        return {
-                            "status":   "ok",
-                            "device":   device_name,
-                            "hmi_type": ht,
-                            "table":    table_name,
-                            "tag":      tag_name,
-                        }
-                raise TiaError("TAG_NOT_FOUND",
-                    f"Tag '{tag_name}' in Tabelle '{table_name}' nicht gefunden.",
-                    True)
-
-        raise TiaError("TABLE_NOT_FOUND",
-            f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True)
-    return sta.run(_tia_call, _run)
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)

@@ -14,45 +14,85 @@ import tia
 from tia import TiaError, _DEFAULT_EXPORT
 import base64
 
-# ── Singleton-Lock ─────────────────────────────────────────────────────────────
-# Verhindert, dass server.py doppelt laeuft (z.B. Claude Desktop + bridge.py).
-# Ein zweiter Start gibt eine klare Fehlermeldung und beendet sich sofort.
+# ═══════════════════════════════════════════════════════════════════════════════
+# VERSION
+# ═══════════════════════════════════════════════════════════════════════════════
+VERSION      = "1.4.0"
+VERSION_DATE = "2026-06-16"
 
-_LOCK_PORT = 47823          # Beliebiger freier lokaler Port
-_lock_socket = None         # Wird beim Start belegt, beim Beenden automatisch freigegeben
+# ── Primär / Proxy Architektur ─────────────────────────────────────────────────
+# Erste Instanz wird "primär": bindet Port 47823 als JSON-RPC TCP-Server und
+# führt alle TIA Openness COM-Aufrufe aus (COM ist Single-Threaded).
+# Weitere Instanzen werden "proxy": verbinden sich mit dem Primär und leiten
+# alle MCP Tool-Calls durch. Beide laufen als vollwertiger MCP stdio-Server.
 
-def _acquire_lock():
-    global _lock_socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+_RPC_PORT   = 47823
+_is_primary = False
+_rpc_server = None
+_com_lock   = None          # asyncio.Lock — serialisiert COM-Zugriffe im Primär
+
+
+async def _rpc_handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Primär: eingehende RPC-Anfrage von einer Proxy-Instanz bearbeiten."""
     try:
-        sock.bind(("127.0.0.1", _LOCK_PORT))
-        sock.listen(1)
-        _lock_socket = sock          # Referenz halten damit GC den Socket nicht schliesst
-    except OSError:
-        sock.close()
-        print(
-            "\n" + "=" * 60 + "\n"
-            "FEHLER: TIA Portal MCP Server laeuft bereits!\n"
-            "\n"
-            "Nur eine Instanz ist erlaubt — sonst gibt es\n"
-            "Konflikte auf der TIA Openness COM-Schnittstelle.\n"
-            "\n"
-            "Loesung: Claude Desktop oder bridge.py beenden,\n"
-            "dann erneut starten.\n"
-            + "=" * 60 + "\n",
-            file=sys.stderr
-        )
-        sys.exit(1)
-
-def _release_lock():
-    global _lock_socket
-    if _lock_socket:
+        data = await reader.readline()
+        if not data:
+            return
+        req  = json.loads(data)
+        result = _dispatch(req["tool"], req.get("args", {}))
+        response = json.dumps({"ok": True, "result": result}, ensure_ascii=False)
+    except TiaError as e:
+        response = json.dumps({"ok": False, "error": e.to_dict()}, ensure_ascii=False)
+    except Exception as e:
+        response = json.dumps({"ok": False, "error": {
+            "status": "error", "code": "UNEXPECTED", "message": str(e)
+        }}, ensure_ascii=False)
+    finally:
         try:
-            _lock_socket.close()
+            writer.write(response.encode() + b"\n")
+            await writer.drain()
+            writer.close()
         except Exception:
             pass
-        _lock_socket = None
+
+
+async def _rpc_call(name: str, args: dict):
+    """Proxy: Tool-Aufruf an den Primär weiterleiten."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", _RPC_PORT)
+    try:
+        req = json.dumps({"tool": name, "args": args}, ensure_ascii=False) + "\n"
+        writer.write(req.encode())
+        await writer.drain()
+        data = await reader.readline()
+        resp = json.loads(data)
+        if resp["ok"]:
+            return resp["result"]
+        err = resp["error"]
+        raise TiaError(err.get("code", "PROXY_ERROR"), err.get("message", str(err)), False)
+    finally:
+        writer.close()
+
+
+async def _start_primary() -> bool:
+    """Versucht primäre Instanz zu werden. True = primär, False = proxy."""
+    global _is_primary, _rpc_server, _com_lock
+    try:
+        srv = await asyncio.start_server(_rpc_handle_client, "127.0.0.1", _RPC_PORT)
+        _rpc_server = srv
+        _is_primary = True
+        _com_lock   = asyncio.Lock()
+        return True
+    except OSError:
+        _is_primary = False
+        return False
+
+
+def _stop_primary():
+    global _rpc_server
+    if _rpc_server:
+        _rpc_server.close()
+        _rpc_server = None
+
 
 server = Server("tia-portal")
 
@@ -65,60 +105,61 @@ und Standardstrukturen anlegen (PLC, HMI Advanced/Unified, Bibliotheken).
 
 # Verfuegbare Tools
 
-## Session (immer zuerst)
-  connect_portal(mode)     → Portal verbinden: attach (laufend) / headless / gui
-  open_project(path)       → Projekt oeffnen (.ap21 Pfad)
+## Session
+  # TIA Portal laeuft noch nicht:
+  open_portal(mode)        → TIA Portal starten: gui (mit Oberflaeche) / headless
+  open_project(path)       → Projekt oeffnen; wartet automatisch bis TIA bereit ist
+
+  # TIA Portal laeuft bereits:
+  connect_portal()         → Laufende TIA Portal Instanz uebernehmen (attach)
+  attach_project()         → Bereits geoeffnetes Projekt uebernehmen
+
+  # Lifecycle Ende:
+  save_project()           → Projekt speichern
+  close_project()          → Projekt schliessen (vorher save_project aufrufen)
+  close_portal()           → TIA Portal beenden (vorher close_project aufrufen)
+
   get_session_status()     → Verbindungs- und Projektstatus pruefen
 
 ## Projekt lesen
   get_project_info()       → Name, Pfad, Geraete
   list_devices()           → Alle Geraete mit erkanntem Typ (PLC / Advanced / Unified)
 
+## PLC Export / Import
+  compile_plc(device)                          → SPS kompilieren
+  export_plc_block(device, block, path?)       → Baustein als XML exportieren
+  import_plc_block(device, file_path)          → Baustein aus XML importieren
+  get_plc_block_source(device, block, path?)   → Quellcode lesen (SCL: Text, LAD/FBD: XML)
+  set_plc_block_source(device, block, scl)     → SCL-Quellcode direkt schreiben
+  export_plc_tagtable(device, table, path?)    → PLC Tag-Tabelle exportieren
+  import_plc_tagtable(device, file_path)       → PLC Tag-Tabelle importieren
+
 ## HMI lesen
   list_hmi_screens(device)            → Alle Bilder mit Groesse und Elementanzahl
   list_hmi_tags(device, table?)       → Tags mit Datentyp, High/Low-Limit, Archivierung
   list_hmi_alarms(device)             → Diskrete und analoge Alarme mit Alarmklasse
   list_hmi_textlists(device)          → Textlisten mit Eintraegen
-  export_hmi_screen(device, screen, path)  → Bild als XML exportieren
-  export_hmi_tags(device, path)            → Alle Tags als XML exportieren
+
+## HMI Export / Import
+  export_hmi_screen(device, screen, path)       → Bild als XML exportieren
+  export_hmi_screens_all(device, path?)         → Alle Screens auf einmal exportieren
+  import_hmi_screen(device, file_path)          → Bild aus XML importieren
+  export_hmi_tags(device, output_path?)         → Alle Tag-Tabellen exportieren (V21: Ordner, V19/V20: XML)
+  import_hmi_tags(device, file_path)            → Tags aus Datei/Ordner importieren
+  export_hmi_tagtable(device, table, path?)     → Einzelne Tag-Tabelle exportieren
+  import_hmi_tagtable(device, file_path)        → Einzelne Tag-Tabelle importieren (Datei oder Ordner)
+  export_hmi_scripts(device, path?)             → HMI-Scripts exportieren
+  import_hmi_scripts(device, file_path)         → HMI-Scripts importieren
+  export_hmi_alarms(device, output_path?)       → Alarme als XML exportieren
+  import_hmi_alarms(device, file_path)          → Alarme aus XML importieren
+  export_hmi_textlists(device, output_path?)    → Textlisten als XML exportieren
+  import_hmi_textlists(device, file_path)       → Textlisten aus XML importieren
 
 ## Bibliothek lesen
   list_libraries()                         → Projekt- und globale Bibliotheken
   list_library_types(lib)                  → Typen mit allen Versionen und Standardversion
   list_master_copies(lib)                  → Master Copies (rekursiv)
   get_library_type_versions(lib, type)     → Versionen eines einzelnen Typs
-
-## PLC lesen (JSON, kein Export noetig)
-  list_plc_blocks(device, group?)      → Bausteine als JSON: name/number/type/language/path
-  list_plc_tag_tables(device)          → Tag-Tabellen mit Namen und Tag-Anzahl
-  list_plc_tags(device, table?)        → PLC-Tags als JSON: name/data_type/address/comment
-
-## Querverweise & Bereinigung
-  get_cross_references(device, symbol)  → Verwendungsstellen eines Tags/Bausteins
-  find_unused_plc_tags(device)          → PLC-Tags ohne Querverweise (compile_plc vorher!)
-  find_unused_hmi_tags(device)          → HMI-Tags ohne Screen-Verwendung
-  delete_plc_tag(device, table, tag)    → Tag löschen — nur nach manueller Prüfung!
-  delete_hmi_tag(device, table, tag)    → HMI-Tag löschen — nur nach manueller Prüfung!
-
-## Bibliothek — Öffnen
-  find_libraries(folder)               → .al* Dateien in Ordner auflisten mit TIA-Version
-  open_library(path_or_folder, hint?)  → globale Bibliothek öffnen; Ordner = auto-detect Version
-
-## UDTs & Bibliothekstypen
-  list_plc_udts(device)                → alle UDTs mit Memberstruktur als JSON
-  use_library_type(device, lib, type, group?) → Typ aus Bibliothek in PLC instanziieren
-
-## PLC Tags anlegen
-  create_plc_tag_table(device, table)  → neue Tag-Tabelle anlegen
-  create_plc_tag(device, table, name, type, address?, comment?) → Tag anlegen
-
-## HMI Tags anlegen
-  create_hmi_tag_table(device, table)  → neue HMI Tag-Tabelle anlegen
-  create_hmi_tag(device, table, name, type, plc_tag?, high?, low?, log?, comment?)
-
-## PLC schreiben
-  save_project()                       → Projekt speichern — nach jeder Aenderung aufrufen!
-  compile_plc(device)                  → Kompilieren vor Export / bei inkonsistenten Bloecken
 
 ## Generisch (lesen und schreiben)
   execute_openness(code, mode)
@@ -283,7 +324,8 @@ Wichtige Einschraenkungen:
 
 # Regeln
 
-1. Reihenfolge: connect_portal → open_project → dann alle anderen Tools
+1. Reihenfolge (TIA nicht offen): open_portal → open_project → Tools → save_project → close_project → close_portal
+   Reihenfolge (TIA bereits offen): connect_portal → attach_project oder open_project → Tools
 2. HMI-Typ: "Unified" in type(sw).__name__ → Unified, sonst Advanced
 3. Ergebnis immer setzen: result = {"status": "ok", ...}
 4. Attribute absichern: value = getattr(obj, "attr", None)
@@ -374,12 +416,32 @@ async def list_tools():
         return types.Tool(name=name, description=desc, inputSchema=schema)
 
     return [
-        T("connect_portal",  "TIA Portal verbinden.",
-          {"mode":{"type":"string","enum":["attach","headless","gui"],"default":"attach"}}),
+        T("open_portal",
+          "TIA Portal starten — neuen Prozess erzeugen. "
+          "mode='gui': mit Oberflaeche (Standard). "
+          "mode='headless': ohne Oberflaeche, fuer Overnight-Workflows. "
+          "Danach open_project() aufrufen — Retry-Logik wartet automatisch.",
+          {"mode":{"type":"string","enum":["gui","headless"],"default":"gui"}}),
+        T("connect_portal",
+          "Laufende TIA Portal Instanz uebernehmen (attach). "
+          "TIA Portal muss bereits offen sein — sonst open_portal() verwenden."),
         T("attach_project",  "Bereits in TIA Portal geoeffnetes Projekt uebernehmen. Kein Pfad noetig."),
-        T("open_project",    "Projekt oeffnen (.ap21).",
-          {"path":{"type":"string"}}, ["path"]),
+        T("open_project",    "Projekt oeffnen (.ap21). "
+          "Nach open_portal() automatisch auf TIA Portal warten (Retry-Logik).",
+          {"path":{"type":"string"},
+           "retries":{"type":"integer","default":10,
+                      "description":"Anzahl Versuche falls TIA noch startet (default 10)"},
+           "retry_delay":{"type":"integer","default":10,
+                          "description":"Sekunden zwischen Versuchen (default 10)"}},
+          ["path"]),
+        T("save_project",  "Aktuelles Projekt speichern. Immer vor close_project aufrufen."),
+        T("close_project", "Aktuelles Projekt schliessen (ohne Speichern). "
+          "Vorher save_project aufrufen."),
+        T("close_portal",  "TIA Portal beenden (Dispose). "
+          "Schliesst alle Projekte und beendet den TIA-Prozess. "
+          "Vorher save_project und close_project aufrufen."),
         T("get_session_status", "Verbindungsstatus."),
+        T("get_version", "Versionen von server.py und tia.py mit Changelog."),
         T("get_project_info",   "Projektinfo und Geraete."),
         T("list_devices",       "Alle Geraete mit HMI-Typ."),
         T("list_hmi_screens",   "Screens eines HMI.",
@@ -390,12 +452,27 @@ async def list_tools():
           {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_textlists", "Textlisten eines HMI.",
           {"device_name":{"type":"string"}}, ["device_name"]),
-        T("export_hmi_screen",  "Screen als XML exportieren.",
+        T("export_hmi_screen",  "Einzelnen HMI-Screen als XML exportieren.",
           {"device_name":{"type":"string"},"screen_name":{"type":"string"},
            "output_path":{"type":"string"}}, ["device_name","screen_name","output_path"]),
-        T("export_hmi_tags",    "Alle HMI-Tags als XML exportieren.",
-          {"device_name":{"type":"string"},"output_path":{"type":"string"}},
-          ["device_name","output_path"]),
+        T("export_hmi_screens_all",
+          "Alle HMI-Screens auf einmal exportieren. output_path = Zielordner (optional).",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zielordner"}},
+          ["device_name"]),
+        T("export_hmi_scripts",
+          "HMI-Scripts (VB/JS) exportieren. output_path = Zielordner (optional).",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zielordner"}},
+          ["device_name"]),
+        T("import_hmi_scripts",
+          "HMI-Scripts aus Datei oder Ordner importieren. Gegenstück zu export_hmi_scripts.",
+          {"device_name":{"type":"string"},"file_path":{"type":"string"}},
+          ["device_name","file_path"]),
+        T("export_hmi_tags",    "Alle HMI-Tags exportieren (V21: DirectoryInfo, V19/V20: XML). output_path = Zielordner (optional).",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zielordner"}},
+          ["device_name"]),
         T("list_libraries",     "Alle Bibliotheken im Projekt."),
         T("list_library_types", "Typen einer Bibliothek mit Versionen.",
           {"library_name":{"type":"string"}}, ["library_name"]),
@@ -418,6 +495,32 @@ async def list_tools():
         T("compile_plc",
           "SPS kompilieren. Behebt inkonsistente Bausteine vor dem Export. "
           "Bei Fehler 'Block is inconsistent' zuerst compile_plc aufrufen.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+
+        # PLC LESEN
+        T("list_plc_blocks",
+          "Alle PLC-Bausteine auflisten (OB, FC, FB, DB) inkl. Untergruppen. "
+          "Rückgabe: name, type, language, number, group, is_consistent. "
+          "Optionaler Filter: group='Antriebe' liefert nur Bausteine dieser Gruppe.",
+          {"device_name":{"type":"string"},
+           "group":{"type":"string","description":"Optional: Gruppenname filtern"}},
+          ["device_name"]),
+
+        T("list_plc_tag_tables",
+          "Alle PLC-Tag-Tabellen auflisten inkl. Untergruppen. "
+          "Rückgabe: name, group, tag_count. Voraussetzung für list_plc_tags und export_plc_tagtable.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+
+        T("list_plc_tags",
+          "Alle Tags einer PLC-Tag-Tabelle auflisten. "
+          "Rückgabe: name, data_type, logical_address, comment. "
+          "table_name aus list_plc_tag_tables entnehmen.",
+          {"device_name":{"type":"string"},"table_name":{"type":"string"}},
+          ["device_name","table_name"]),
+
+        T("list_plc_udts",
+          "Alle PLC-UDTs (Strukturen/Typen) auflisten inkl. Untergruppen. "
+          "Rückgabe: name, type (PlcStruct/PlcTypedeF), group, is_consistent.",
           {"device_name":{"type":"string"}}, ["device_name"]),
 
         # PLC EXPORT / IMPORT
@@ -462,6 +565,47 @@ async def list_tools():
           "HMI Screen aus XML importieren.",
           {"device_name":{"type":"string"},"file_path":{"type":"string"}},
           ["device_name","file_path"]),
+        T("create_hmi_structure",
+          "Ordnerstruktur im HMI anlegen (Bilder und Tag-Tabellen). "
+          "Funktioniert für WinCC Advanced und Unified.",
+          {"device_name": {"type":"string"},
+           "structure":   {"type":"object",
+                           "description":
+                             "Dict mit 'screens' und/oder 'tag_tables'. "
+                             "Wert: Liste aus Strings oder {\"Ordner\":[\"Kind1\",\"Kind2\"]}.",
+                           "properties": {
+                             "screens":    {"type":"array"},
+                             "tag_tables": {"type":"array"}
+                           }}},
+          ["device_name","structure"]),
+        T("import_hmi_tags",
+          "Alle HMI-Tags aus XML importieren. Gegenstück zu export_hmi_tags.",
+          {"device_name":{"type":"string"},"file_path":{"type":"string"}},
+          ["device_name","file_path"]),
+        T("export_hmi_alarms",
+          "HMI-Alarme als XML exportieren. Gegenstück zu import_hmi_alarms.",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zieldatei"}},
+          ["device_name"]),
+        T("import_hmi_alarms",
+          "HMI-Alarme aus XML importieren. Gegenstück zu export_hmi_alarms.",
+          {"device_name":{"type":"string"},"file_path":{"type":"string"}},
+          ["device_name","file_path"]),
+        T("export_hmi_textlists",
+          "HMI-Textlisten als XML exportieren. Gegenstück zu import_hmi_textlists.",
+          {"device_name":{"type":"string"},
+           "output_path":{"type":"string","description":"Optional: Zieldatei"}},
+          ["device_name"]),
+        T("import_hmi_textlists",
+          "HMI-Textlisten aus XML importieren. Gegenstück zu export_hmi_textlists.",
+          {"device_name":{"type":"string"},"file_path":{"type":"string"}},
+          ["device_name","file_path"]),
+        T("set_plc_block_source",
+          "SCL-Quellcode direkt in einen Baustein schreiben. Gegenstück zu get_plc_block_source. "
+          "Nur für SCL-Bausteine. scl_source = SCL-Code als String.",
+          {"device_name":{"type":"string"},"block_name":{"type":"string"},
+           "scl_source":{"type":"string","description":"SCL-Quellcode als String"}},
+          ["device_name","block_name","scl_source"]),
 
         # DATEI-HILFSFUNKTIONEN
         T("write_import_file",
@@ -477,163 +621,11 @@ async def list_tools():
           "Damit kann Claude exportierte Bausteine oder Tags im Chat anzeigen.",
           {"file_path":{"type":"string"}},
           ["file_path"]),
-
-        # PLC LESEN (JSON — kein Export noetig)
-        T("list_plc_blocks",
-          "Alle Bausteine der PLC als JSON. "
-          "Felder: name, number, type (OB/FC/FB/DB/UDT), language, path (Ordner). "
-          "group_path optional: nur eine Gruppe lesen, z.B. 'Antriebe' oder 'Antriebe/Pumpen'. "
-          "Vor export_plc_block aufrufen um verfuegbare Namen zu kennen.",
-          {"device_name": {"type": "string"},
-           "group_path":  {"type": "string",
-                           "description": "Optional: Unterordner filtern, z.B. 'Antriebe'"}},
-          ["device_name"]),
-
-        T("list_plc_tag_tables",
-          "Alle PLC Tag-Tabellen mit Name und Tag-Anzahl. "
-          "Aufrufen bevor list_plc_tags oder export_plc_tagtable, "
-          "um verfuegbare Tabellennamen zu kennen.",
-          {"device_name": {"type": "string"}},
-          ["device_name"]),
-
-        T("list_plc_tags",
-          "PLC-Tags direkt als JSON (kein XML-Export). "
-          "Felder: name, data_type, logical_address, comment, table. "
-          "table_name optional: nur eine Tabelle lesen. Leer = alle Tabellen.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string",
-                           "description": "Optional: nur diese Tabelle lesen"}},
-          ["device_name"]),
-
-        T("save_project",
-          "Aktuelles Projekt speichern (project.Save()). "
-          "Nach allen schreibenden Operationen aufrufen."),
-
-        # BIBLIOTHEK — Öffnen / Suchen
-        T("find_libraries",
-          "Ordner nach globalen TIA-Bibliotheken (.al*) durchsuchen. "
-          "Gibt Name, Pfad und TIA-Version zurück. "
-          "Aufrufen wenn Bibliothekspfad unbekannt oder Version unklar.",
-          {"folder": {"type": "string",
-                      "description": "Ordner z.B. C:\\Bibliotheken"}},
-          ["folder"]),
-
-        T("open_library",
-          "Globale TIA-Bibliothek öffnen. "
-          "path_or_folder: vollständiger Dateipfad (.al21) ODER Ordnerpfad — "
-          "dann wird automatisch die zur laufenden TIA-Version passende Datei gewählt. "
-          "name_hint: optionaler Teilname bei mehreren Bibliotheken im Ordner.",
-          {"path_or_folder": {"type": "string"},
-           "name_hint":      {"type": "string",
-                              "description": "Optional: Teilname z.B. 'Antriebe'"}},
-          ["path_or_folder"]),
-
-        # UDTs lesen
-        T("list_plc_udts",
-          "Alle UDTs der PLC als JSON mit vollständiger Memberstruktur. "
-          "Felder je Member: name, data_type, default_value, comment, offset. "
-          "Wichtig für HMI-Tag-Automation und Validierung.",
-          {"device_name": {"type": "string"}},
-          ["device_name"]),
-
-        # Bibliothekstyp instanziieren
-        T("use_library_type",
-          "Bibliothekstyp (UDT, FB, FC) aus Projekt- oder globaler Bibliothek "
-          "in PLC instanziieren. Verwendet die Standardversion. "
-          "group_path optional: Zielordner im PLC z.B. 'Antriebe'.",
-          {"device_name":   {"type": "string"},
-           "library_name":  {"type": "string"},
-           "type_name":     {"type": "string"},
-           "group_path":    {"type": "string",
-                             "description": "Optional: Zielordner z.B. 'Antriebe'"}},
-          ["device_name", "library_name", "type_name"]),
-
-        # PLC Tags anlegen
-        T("create_plc_tag_table",
-          "Neue PLC Tag-Tabelle anlegen.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string"}},
-          ["device_name", "table_name"]),
-
-        T("create_plc_tag",
-          "Einzelnen PLC-Tag anlegen. "
-          "Tabelle muss existieren (vorher list_plc_tag_tables prüfen). "
-          "data_type z.B. 'Bool', 'Int', 'Real', 'DWord'. "
-          "address optional z.B. '%M0.0'. comment optional.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string"},
-           "tag_name":    {"type": "string"},
-           "data_type":   {"type": "string"},
-           "address":     {"type": "string",
-                           "description": "Optional: z.B. '%M0.0'"},
-           "comment":     {"type": "string"}},
-          ["device_name", "table_name", "tag_name", "data_type"]),
-
-        # HMI Tags anlegen
-        T("create_hmi_tag_table",
-          "Neue HMI Tag-Tabelle anlegen.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string"}},
-          ["device_name", "table_name"]),
-
-        T("create_hmi_tag",
-          "Einzelnen HMI-Tag anlegen. "
-          "data_type z.B. 'Int', 'Real', 'Bool'. "
-          "plc_tag: Verknüpfung mit PLC-Tag z.B. 'PLC_1.DB1.Motor1_Drehzahl'. "
-          "high_limit / low_limit für analoge Tags. "
-          "logging_enabled: Archivierung.",
-          {"device_name":      {"type": "string"},
-           "table_name":       {"type": "string"},
-           "tag_name":         {"type": "string"},
-           "data_type":        {"type": "string"},
-           "plc_tag":          {"type": "string",
-                                "description": "Optional: PLC-Tag Verknüpfung"},
-           "high_limit":       {"type": "number"},
-           "low_limit":        {"type": "number"},
-           "logging_enabled":  {"type": "boolean"},
-           "comment":          {"type": "string"}},
-          ["device_name", "table_name", "tag_name", "data_type"]),
-
-        # QUERVERWEISE & UNGENUTZTE TAGS
-        T("get_cross_references",
-          "Alle Verwendungsstellen eines Symbols (Tag, Baustein, DB-Variable). "
-          "PLC muss kompiliert sein. "
-          "Rückgabe: block, block_type, language, usage (Read/Write/Call), location.",
-          {"device_name": {"type": "string"},
-           "symbol":      {"type": "string",
-                           "description": "z.B. 'Motor1_Start', 'FB_Antrieb', 'DB1'"}},
-          ["device_name", "symbol"]),
-
-        T("find_unused_plc_tags",
-          "Alle PLC-Tags die in keinem Baustein verwendet werden. "
-          "PLC muss kompiliert sein (compile_plc aufrufen). "
-          "Ergebnis prüfen bevor delete_plc_tag aufgerufen wird!",
-          {"device_name": {"type": "string"}},
-          ["device_name"]),
-
-        T("find_unused_hmi_tags",
-          "Alle HMI-Tags die in keinem Screen verwendet werden. "
-          "verified=false im Ergebnis bedeutet manuelle Prüfung nötig.",
-          {"device_name": {"type": "string"}},
-          ["device_name"]),
-
-        T("delete_plc_tag",
-          "Einzelnen PLC-Tag löschen. "
-          "IMMER zuerst find_unused_plc_tags aufrufen und Liste manuell prüfen! "
-          "Danach save_project aufrufen.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string"},
-           "tag_name":    {"type": "string"}},
-          ["device_name", "table_name", "tag_name"]),
-
-        T("delete_hmi_tag",
-          "Einzelnen HMI-Tag löschen. "
-          "IMMER zuerst find_unused_hmi_tags aufrufen und Liste manuell prüfen! "
-          "Danach save_project aufrufen.",
-          {"device_name": {"type": "string"},
-           "table_name":  {"type": "string"},
-           "tag_name":    {"type": "string"}},
-          ["device_name", "table_name", "tag_name"]),
+        T("restart_server",
+          "MCP Server neu starten. "
+          "Der primaere Prozess beendet sich sauber (TIA Verbindung wird getrennt), "
+          "Claude Code startet ihn automatisch neu. "
+          "Proxy-Instanzen verbinden sich beim naechsten Aufruf selbst wieder."),
     ]
 
 # ── Dispatch ───────────────────────────────────────────────────────────────────
@@ -643,9 +635,14 @@ async def call_tool(name, arguments):
     import logging
     log = logging.getLogger("tia.server")
     a = arguments or {}
-    log.info(f"Tool: {name}  keys={list(a.keys())}")
+    mode = "primär" if _is_primary else "proxy"
+    log.info(f"Tool [{mode}]: {name}  keys={list(a.keys())}")
     try:
-        result = _dispatch(name, a)
+        if _is_primary:
+            async with _com_lock:
+                result = _dispatch(name, a)
+        else:
+            result = await _rpc_call(name, a)
         return [types.TextContent(type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2))]
     except TiaError as e:
@@ -660,10 +657,19 @@ async def call_tool(name, arguments):
 
 def _dispatch(name, a):
     match name:
-        case "connect_portal":             return tia.connect_portal(a.get("mode","attach"))
+        case "open_portal":                return tia.open_portal(a.get("mode","gui"))
+        case "connect_portal":             return tia.connect_portal()
         case "attach_project":             return tia.attach_project()
-        case "open_project":               return tia.open_project(a["path"])
+        case "open_project":               return tia.open_project(a["path"],a.get("retries",10),a.get("retry_delay",10))
+        case "save_project":               return tia.save_project()
+        case "close_project":              return tia.close_project()
+        case "close_portal":               return tia.close_portal()
         case "get_session_status":         return tia.get_session_status()
+        case "get_version":                return {
+                                               "server": {"version": VERSION, "date": VERSION_DATE, "file": __file__},
+                                               "tia":    tia.VERSION_INFO,
+                                               "match":  VERSION == tia.VERSION,
+                                           }
         case "get_project_info":           return tia.get_project_info()
         case "list_devices":               return tia.list_devices()
         case "list_hmi_screens":           return tia.list_hmi_screens(a["device_name"])
@@ -671,7 +677,10 @@ def _dispatch(name, a):
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])
         case "list_hmi_textlists":         return tia.list_hmi_textlists(a["device_name"])
         case "export_hmi_screen":          return tia.export_hmi_screen(a["device_name"],a["screen_name"],a["output_path"])
-        case "export_hmi_tags":            return tia.export_hmi_tags(a["device_name"],a["output_path"])
+        case "export_hmi_screens_all":     return tia.export_hmi_screens_all(a["device_name"],a.get("output_path"))
+        case "export_hmi_scripts":         return tia.export_hmi_scripts(a["device_name"],a.get("output_path"))
+        case "import_hmi_scripts":         return tia.import_hmi_scripts(a["device_name"],a["file_path"])
+        case "export_hmi_tags":            return tia.export_hmi_tags(a["device_name"],a.get("output_path"))
         case "list_libraries":             return tia.list_libraries()
         case "list_library_types":         return tia.list_library_types(a["library_name"])
         case "list_master_copies":         return tia.list_master_copies(a["library_name"])
@@ -679,6 +688,10 @@ def _dispatch(name, a):
         case "execute_openness":           return tia.execute_openness(a["code"],a.get("mode","read"))
         case "get_standard_template":      return {"template": _STANDARD_TEMPLATE}
         case "compile_plc":                return tia.compile_plc(a["device_name"])
+        case "list_plc_blocks":            return tia.list_plc_blocks(a["device_name"], a.get("group"))
+        case "list_plc_tag_tables":        return tia.list_plc_tag_tables(a["device_name"])
+        case "list_plc_tags":              return tia.list_plc_tags(a["device_name"], a["table_name"])
+        case "list_plc_udts":              return tia.list_plc_udts(a["device_name"])
         case "export_plc_block":           return tia.export_plc_block(a["device_name"],a["block_name"],a.get("output_path"))
         case "import_plc_block":           return tia.import_plc_block(a["device_name"],a["file_path"])
         case "get_plc_block_source":       return tia.get_plc_block_source(a["device_name"],a["block_name"],a.get("output_path"))
@@ -687,40 +700,42 @@ def _dispatch(name, a):
         case "export_hmi_tagtable":        return tia.export_hmi_tagtable(a["device_name"],a["table_name"],a.get("output_path"))
         case "import_hmi_tagtable":        return tia.import_hmi_tagtable(a["device_name"],a["file_path"])
         case "import_hmi_screen":          return tia.import_hmi_screen(a["device_name"],a["file_path"])
+        case "create_hmi_structure":       return tia.create_hmi_structure(a["device_name"],a["structure"])
+        case "import_hmi_tags":            return tia.import_hmi_tags(a["device_name"],a["file_path"])
+        case "export_hmi_alarms":          return tia.export_hmi_alarms(a["device_name"],a.get("output_path"))
+        case "import_hmi_alarms":          return tia.import_hmi_alarms(a["device_name"],a["file_path"])
+        case "export_hmi_textlists":       return tia.export_hmi_textlists(a["device_name"],a.get("output_path"))
+        case "import_hmi_textlists":       return tia.import_hmi_textlists(a["device_name"],a["file_path"])
+        case "set_plc_block_source":       return tia.set_plc_block_source(a["device_name"],a["block_name"],a["scl_source"])
         case "write_import_file":          return tia.write_import_file(a["filename"],a["content"])
         case "read_export_file":           return tia.read_export_file(a["file_path"])
-        case "list_plc_blocks":            return tia.list_plc_blocks(a["device_name"],a.get("group_path"))
-        case "list_plc_tag_tables":        return tia.list_plc_tag_tables(a["device_name"])
-        case "list_plc_tags":              return tia.list_plc_tags(a["device_name"],a.get("table_name"))
-        case "find_libraries":       return tia.find_libraries(a["folder"])
-        case "open_library":          return tia.open_library(a["path_or_folder"], a.get("name_hint"))
-        case "list_plc_udts":         return tia.list_plc_udts(a["device_name"])
-        case "use_library_type":      return tia.use_library_type(a["device_name"],a["library_name"],a["type_name"],a.get("group_path"))
-        case "create_plc_tag_table":  return tia.create_plc_tag_table(a["device_name"],a["table_name"])
-        case "create_plc_tag":        return tia.create_plc_tag(a["device_name"],a["table_name"],a["tag_name"],a["data_type"],a.get("address"),a.get("comment"))
-        case "create_hmi_tag_table":  return tia.create_hmi_tag_table(a["device_name"],a["table_name"])
-        case "create_hmi_tag":        return tia.create_hmi_tag(a["device_name"],a["table_name"],a["tag_name"],a["data_type"],a.get("plc_tag"),a.get("high_limit"),a.get("low_limit"),a.get("logging_enabled",False),a.get("comment"))
-        case "save_project":          return tia.save_project()
-        case "get_cross_references":   return tia.get_cross_references(a["device_name"],a["symbol"])
-        case "find_unused_plc_tags":   return tia.find_unused_plc_tags(a["device_name"])
-        case "find_unused_hmi_tags":   return tia.find_unused_hmi_tags(a["device_name"])
-        case "delete_plc_tag":         return tia.delete_plc_tag(a["device_name"],a["table_name"],a["tag_name"])
-        case "delete_hmi_tag":         return tia.delete_hmi_tag(a["device_name"],a["table_name"],a["tag_name"])
+        case "restart_server":
+            import threading
+            threading.Timer(0.5, sys.exit, args=[0]).start()
+            role = "primaer" if _is_primary else "proxy (Anfrage weitergeleitet)"
+            return {"status": "ok", "message": f"Server wird neu gestartet (Rolle: {role})"}
         case _: raise TiaError("UNKNOWN_TOOL",f"Unbekanntes Tool: {name}",False)
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 async def main():
-    _acquire_lock()                  # Blockiert sofort falls eine Instanz laeuft
-    tia.setup()
     import logging
-    logging.getLogger("tia.server").info("MCP Server startet")
+    log = logging.getLogger("tia.server")
+
+    primary = await _start_primary()
+    role = "primär" if primary else "proxy"
+    log.info(f"MCP Server startet als {role}")
+
+    if primary:
+        tia.setup()
+
     try:
         async with stdio_server() as (r, w):
             await server.run(r, w, server.create_initialization_options())
     finally:
-        tia.teardown()
-        _release_lock()
+        if primary:
+            tia.teardown()
+            _stop_primary()
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,417 +1,347 @@
 # TIA Portal MCP Server
 
-Python-basierter MCP-Server (Model Context Protocol) der Claude, lokale LLMs
-(Ollama) und **Microsoft Copilot Studio** mit **TIA Portal V21** über die Openness API verbindet.
-
-Ermöglicht LLM-gesteuerte Automatisierung von PLC/HMI-Entwicklungsaufgaben:
-Bausteine lesen und bearbeiten, Tags verwalten, HMI konfigurieren, Projekte validieren.
-
-> **Internes Tooling** — läuft auf der gleichen Windows-Maschine wie TIA Portal V21.
-
----
-
-## Dateien
-
-| Datei | Inhalt |
-|---|---|
-| `server.py` | MCP stdio Server · Tool-Definitionen · System Prompt · Singleton-Lock |
-| `tia.py` | TIA Openness Anbindung · STA-Thread · Session · PLC · HMI · Bibliothek · Executor |
-| `bridge.py` | Ollama ↔ MCP Bridge · lokales LLM statt Claude Desktop |
-| `web_server.py` | MCP HTTP Streamable Server · für Copilot Studio via Dev Tunnel |
-| `start_copilot.bat` | Starter: TIA Portal + web_server.py + Dev Tunnel |
-| `start_webui.bat` | Starter: TIA Portal + web_server.py + OpenWebUI |
+KI-Integration für Siemens TIA Portal V21 via Model Context Protocol (MCP).  
+Verbindet Claude Desktop, Copilot Studio und andere MCP-Clients mit TIA Portal über die Openness API.
 
 ---
 
 ## Voraussetzungen
 
-| | |
+| Komponente | Version |
 |---|---|
-| TIA Portal | V21 (installiert und lizenziert) |
-| Python | 3.10+ (64-bit) |
-| Betriebssystem | Windows 10/11 (64-bit) |
-| Rechte | Administrator (COM-Zugriff auf TIA) |
-| Claude Desktop | [claude.ai/download](https://claude.ai/download) |
+| TIA Portal | V21 (getestet), V19/V20 teilweise kompatibel |
+| Python | 3.12+ |
+| Siemens.Engineering.dll | V21 PublicAPI (`C:\Program Files\Siemens\Automation\Portal V21\PublicAPI\V21\net48`) |
+| MCP Client | Claude Desktop, Copilot Studio, Open WebUI + Ollama |
 
 ---
 
 ## Installation
 
-```powershell
-# Im Projektordner, als Administrator
-python -m venv .venv
-.venv\Scripts\activate
-pip install mcp pythonnet
+```
+C:\tia-mcp\
+  server.py       ← MCP-Einstiegspunkt
+  tia.py          ← Openness-Logik
+  README.md
+  export\         ← Exportpfad (wird automatisch angelegt)
+    import\       ← Importpfad für write_import_file
 ```
 
-**TIA Openness aktivieren:**
-Extras → Einstellungen → Allgemein → TIA Portal Openness → Zugriff erlauben → TIA neu starten
-
----
-
-## Modus 1 — Claude Desktop (stdio)
-
-**Claude Desktop konfigurieren** (`%APPDATA%\Claude\claude_desktop_config.json`):
-
+**Claude Desktop** — `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "tia-portal": {
-      "command": "F:\\MCP-Server\\.venv\\Scripts\\python.exe",
-      "args":    ["F:\\MCP-Server\\server.py"],
-      "cwd":     "F:\\MCP-Server"
+      "command": "C:\\tia-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\tia-mcp\\server.py"]
     }
   }
 }
 ```
 
-> `command` muss auf die `python.exe` im `.venv` zeigen — nicht System-Python!
+---
 
-TIA Portal öffnen, Projekt laden, Claude Desktop starten — das Hammer-Symbol unten im Chat zeigt alle verfügbaren Tools.
+## Versionsabfrage
+
+```
+get_version
+```
+
+Gibt die laufenden Versionen von `server.py` und `tia.py` zurück, inklusive Changelog der letzten Änderungen. `match: true` wenn beide auf dem gleichen Stand sind.
+
+```json
+{
+  "server": { "version": "1.0.0", "date": "2026-06-14", "file": "..." },
+  "tia":    { "version": "1.2.0", "date": "2026-06-14", "changes": [...] },
+  "match":  false
+}
+```
+
+> `match: false` ist normal wenn `tia.py` aktualisiert wurde ohne `server.py` anzupassen.
 
 ---
 
-## Modus 2 — Copilot Studio (HTTP via Dev Tunnel)
+## Workflow
 
-`web_server.py` implementiert den **MCP Streamable HTTP Transport** den Copilot Studio benötigt.
-Da Copilot Studio eine öffentlich erreichbare HTTPS-URL erwartet, wird ein
-**Microsoft Dev Tunnel** eingesetzt der den lokalen Port 8000 nach außen tunnelt.
-
-> Die TIA-Daten verlassen dabei das lokale System — nur sinnvoll wenn das
-> datenschutzseitig akzeptiert ist (Microsoft M365-Tenant).
-
-### Einmalige Einrichtung
-
-**Pakete nachinstallieren:**
-```powershell
-.venv\Scripts\activate
-pip install uvicorn starlette
+```
+open_portal / connect_portal
+       ↓
+attach_project / open_project
+       ↓
+  [Tools aufrufen]
+       ↓
+  save_project
+       ↓
+ close_project
 ```
 
-**Dev Tunnel CLI installieren und einrichten:**
-```powershell
-winget install Microsoft.devtunnel
-devtunnel user login                          # mit Firmen-Microsoft-Account anmelden
-devtunnel create tia-mcp --allow-anonymous    # benannten Tunnel anlegen
-devtunnel port create tia-mcp -p 8000         # Port 8000 registrieren
-devtunnel show tia-mcp                        # feste URL anzeigen
-```
-
-Die URL hat das Format `https://tia-mcp-8000.euw.devtunnels.ms` — diese **einmalig**
-in Copilot Studio eintragen.
-
-**Copilot Studio konfigurieren:**
-```
-Agent öffnen
-→ Tools → Add Tool → New Tool → Model Context Protocol
-→ URL: https://tia-mcp-8000.euw.devtunnels.ms/mcp
-→ Authentication: None
-→ Create
-```
-
-### Täglicher Betrieb
-
-```powershell
-# Alles auf einmal starten:
-start_copilot.bat
-```
-
-Die Batch-Datei startet in dieser Reihenfolge:
-1. TIA Portal (minimiert, 35 Sekunden Wartezeit)
-2. `web_server.py` in eigenem Fenster (Port 8000)
-3. Dev Tunnel `tia-mcp` in eigenem Fenster
-
-Zum Beenden: beide Fenster schließen und TIA Portal beenden.
-Der Tunnel ist **nur aktiv solange der Prozess läuft** — kein Dauerzugriff von außen.
-
-### Projektpfad anpassen
-
-In `start_copilot.bat` ganz oben:
-```bat
-set PROJECT_DIR=F:\02_Projekte\AI\MCP-Server
-```
-
-> `server.py` (Claude Desktop / stdio) und `web_server.py` (Copilot Studio / HTTP)
-> verwenden denselben TIA STA-Thread — **nicht gleichzeitig starten**.
+- **`open_portal`** — Startet TIA Portal als neuen Prozess (kann >4 Minuten dauern, ggf. Timeout).
+- **`connect_portal`** — Verbindet sich mit einem bereits laufenden TIA Portal.
+- **`attach_project`** — Übernimmt das im Portal geöffnete Projekt.
+- **`open_project`** — Öffnet ein Projekt per Pfad.
 
 ---
 
-## Tools (Übersicht)
+## Tools — Übersicht
 
-### Session
-| Tool | Beschreibung |
-|---|---|
-| `connect_portal(mode)` | Portal verbinden: `attach` / `headless` / `gui` |
-| `attach_project()` | Bereits geöffnetes Projekt übernehmen |
-| `open_project(path)` | Projekt per Pfad öffnen (`.ap21`) |
-| `get_session_status()` | Verbindungs- und Projektstatus |
-| `get_project_info()` | Projektname, Pfad, Geräteübersicht |
-| `list_devices()` | Alle Geräte mit Typ: PLC / Advanced / Unified |
+### Session & Projekt
 
-### PLC — Lesen (JSON, kein Export nötig)
-| Tool | Beschreibung |
-|---|---|
-| `list_plc_blocks(device, group?)` | Alle Bausteine: name, number, type, language, path |
-| `list_plc_tag_tables(device)` | Tag-Tabellen mit Namen und Tag-Anzahl |
-| `list_plc_tags(device, table?)` | PLC-Tags: name, data_type, address, comment |
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `open_portal` | `mode` (gui\|headless) | TIA Portal starten |
+| `connect_portal` | — | Laufendes Portal verbinden |
+| `attach_project` | — | Geöffnetes Projekt übernehmen |
+| `open_project` | `path` | Projekt per Pfad öffnen |
+| `save_project` | — | Projekt speichern |
+| `close_project` | — | Projekt schließen |
+| `close_portal` | — | TIA Portal beenden |
+| `get_session_status` | — | Verbindungsstatus |
+| `get_version` | — | Server- und tia.py-Version + Changelog |
+| `get_project_info` | — | Projektname, Pfad, Geräteliste |
+| `list_devices` | — | Alle Geräte mit Typ (PLC / Advanced / Unified) |
 
-### PLC — Export / Import / Kompilieren
-| Tool | Beschreibung |
-|---|---|
-| `compile_plc(device)` | Kompilieren — vor Export bei inkonsistenten Bausteinen |
-| `get_plc_block_source(device, block)` | Quellcode lesen: SCL direkt, LAD/FBD als XML |
-| `export_plc_block(device, block, path?)` | Baustein als XML exportieren |
-| `import_plc_block(device, file)` | Baustein aus XML importieren |
-| `export_plc_tagtable(device, table, path?)` | Tag-Tabelle als XML exportieren |
-| `import_plc_tagtable(device, file)` | Tag-Tabelle aus XML importieren |
-| `save_project()` | Projekt speichern — nach jeder Änderung aufrufen |
+### PLC
 
-### HMI
-| Tool | Beschreibung |
-|---|---|
-| `list_hmi_screens(device)` | Screens mit Größe und Elementanzahl |
-| `list_hmi_tags(device, table?)` | Tags mit Typ, High/Low-Limit, Archivierung |
-| `list_hmi_alarms(device)` | Diskrete und analoge Alarme |
-| `list_hmi_textlists(device)` | Textlisten mit Einträgen |
-| `export_hmi_screen(device, screen, path)` | Screen als XML exportieren |
-| `export_hmi_tags(device, path)` | Alle Tags als XML exportieren |
-| `export_hmi_tagtable(device, table, path?)` | Einzelne Tabelle exportieren |
-| `import_hmi_tagtable(device, file)` | Tag-Tabelle importieren |
-| `import_hmi_screen(device, file)` | Screen importieren |
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `compile_plc` | `device_name` | PLC kompilieren |
+| `list_plc_blocks` | `device_name`, [`group`] | Alle Bausteine auflisten (inkl. Untergruppen, opt. Gruppenfilter) |
+| `list_plc_tag_tables` | `device_name` | Alle Tag-Tabellen auflisten |
+| `list_plc_tags` | `device_name`, `table_name` | Tags einer Tabelle auflisten |
+| `list_plc_udts` | `device_name` | Alle UDTs/Strukturen auflisten |
+| `get_plc_block_source` | `device_name`, `block_name` | SCL-Quellcode lesen |
+| `set_plc_block_source` | `device_name`, `block_name`, `scl_source` | SCL-Quellcode schreiben¹ |
+| `export_plc_block` | `device_name`, `block_name` | Baustein als XML exportieren |
+| `import_plc_block` | `device_name`, `file_path` | Baustein aus XML importieren |
+| `export_plc_tagtable` | `device_name`, `table_name` | PLC-Tag-Tabelle exportieren |
+| `import_plc_tagtable` | `device_name`, `file_path` | PLC-Tag-Tabelle importieren |
+
+¹ Nur einfache SCL-Anweisungen ohne Keywords/Kommentare. Für komplexen SCL: Export → XML bearbeiten → Import.
+
+### HMI: Lesen
+
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `list_hmi_screens` | `device_name` | Alle Screens (Advanced + Unified) |
+| `list_hmi_tags` | `device_name`, [`table_name`] | HMI-Tags (optional gefiltert) |
+| `list_hmi_alarms` | `device_name` | Alarme (Unified: discrete + analog) |
+| `list_hmi_textlists` | `device_name` | Textlisten² |
+
+² V21-Limitation: `TextLists`-Attribut nicht verfügbar — gibt immer `count:0` zurück.
+
+### HMI: Export & Import
+
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `export_hmi_screen` | `device_name`, `screen_name`, `output_path` | Einzelnen Screen exportieren³ |
+| `export_hmi_screens_all` | `device_name`, [`output_path`] | Alle Screens exportieren³ |
+| `import_hmi_screen` | `device_name`, `file_path` | Screen importieren⁴ |
+| `export_hmi_tags` | `device_name`, [`output_path`] | Alle Tag-Tabellen exportieren |
+| `export_hmi_tagtable` | `device_name`, `table_name`, [`output_path`] | Einzelne Tag-Tabelle exportieren |
+| `import_hmi_tagtable` | `device_name`, `file_path` | Tag-Tabelle importieren |
+| `import_hmi_tags` | `device_name`, `file_path` | Alle HMI-Tags importieren |
+| `export_hmi_alarms` | `device_name`, [`output_path`] | Alarme exportieren² |
+| `import_hmi_alarms` | `device_name`, `file_path` | Alarme importieren² |
+| `export_hmi_textlists` | `device_name`, [`output_path`] | Textlisten exportieren² |
+| `import_hmi_textlists` | `device_name`, `file_path` | Textlisten importieren² |
+| `export_hmi_scripts` | `device_name`, [`output_path`] | Scripts exportieren |
+| `import_hmi_scripts` | `device_name`, `file_path` | Scripts importieren |
+| `create_hmi_structure` | `device_name`, `structure` | Ordnerstruktur anlegen (experimentell) |
+
+³ Advanced: direkte API. Unified: V21-Limitation — Screens in binären DB-Dateien, kein Openness-Export möglich.  
+⁴ Advanced: existierender Screen wird automatisch gelöscht, dann importiert. Unified: V21-Limitation.
 
 ### Bibliotheken
-| Tool | Beschreibung |
-|---|---|
-| `list_libraries()` | Projekt- und globale Bibliotheken |
-| `list_library_types(lib)` | Typen mit Versionen und Standardversion |
-| `list_master_copies(lib)` | Master Copies inkl. Unterordner |
-| `get_library_type_versions(lib, type)` | Versionen und Status eines Typs |
 
-### Querverweise & Bereinigung
-| Tool | Beschreibung |
-|---|---|
-| `get_cross_references(device, symbol)` | Alle Verwendungsstellen eines Tags oder Bausteins — PLC muss kompiliert sein |
-| `find_unused_plc_tags(device)` | PLC-Tags ohne Querverweise — erst `compile_plc` aufrufen |
-| `find_unused_hmi_tags(device)` | HMI-Tags ohne Screen-Verwendung |
-| `delete_plc_tag(device, table, tag)` | Einzelnen PLC-Tag löschen — nur nach manueller Prüfung der Liste |
-| `delete_hmi_tag(device, table, tag)` | Einzelnen HMI-Tag löschen — nur nach manueller Prüfung |
-
-> ⚠️ Nie autonom löschen — immer erst `find_unused_*` aufrufen, Liste prüfen, dann gezielt löschen.
-
-### Bibliothek — Öffnen & Suchen
-| Tool | Beschreibung |
-|---|---|
-| `find_libraries(folder)` | Ordner nach `.al*` Bibliotheken durchsuchen — zeigt Name, Pfad, TIA-Version |
-| `open_library(path_or_folder, hint?)` | Globale Bibliothek öffnen; bei Ordnerangabe wird die zur laufenden TIA-Version passende Datei automatisch gewählt |
-
-### UDTs & Bibliothekstypen
-| Tool | Beschreibung |
-|---|---|
-| `list_plc_udts(device)` | Alle UDTs mit vollständiger Memberstruktur als JSON |
-| `use_library_type(device, lib, type, group?)` | Typ (UDT/FB/FC) aus Bibliothek in PLC instanziieren |
-
-### PLC Tags anlegen
-| Tool | Beschreibung |
-|---|---|
-| `create_plc_tag_table(device, table)` | Neue Tag-Tabelle anlegen |
-| `create_plc_tag(device, table, name, type, address?, comment?)` | Einzelnen PLC-Tag anlegen |
-
-### HMI Tags anlegen
-| Tool | Beschreibung |
-|---|---|
-| `create_hmi_tag_table(device, table)` | Neue HMI Tag-Tabelle anlegen |
-| `create_hmi_tag(device, table, name, type, plc_tag?, high?, low?, log?, comment?)` | Einzelnen HMI-Tag anlegen mit optionaler PLC-Verknüpfung, Grenzwerten und Archivierung |
-
-### Allgemein
-| Tool | Beschreibung |
-|---|---|
-| `execute_openness(code, mode)` | Python-Code direkt gegen Openness. `mode='read'`\|`'write'` |
-| `get_standard_template()` | Vorlage für Standardprojektstruktur |
-| `write_import_file(name, content)` | Hochgeladene Datei für Import speichern |
-| `read_export_file(path)` | Exportierte Datei lesen und anzeigen |
-
----
-
-## Bereinigung ungenutzter Tags
-
-```
-# 1. Kompilieren (Querverweise müssen aktuell sein)
-compile_plc("PLC_1")
-
-# 2. Ungenutzte Tags finden
-find_unused_plc_tags("PLC_1")
-→ {"unused": [
-     {"name": "Motor2_Alt",   "table": "Standard_Tags"},
-     {"name": "Pumpe3_Test",  "table": "Standard_Tags"},
-     {"name": "Debug_Flag",   "table": "Merker"}
-   ]}
-
-# 3. Liste prüfen — dann gezielt löschen
-delete_plc_tag("PLC_1", "Standard_Tags", "Motor2_Alt")
-delete_plc_tag("PLC_1", "Standard_Tags", "Pumpe3_Test")
-
-# 4. Speichern
-save_project()
-```
-
----
-
-## Bibliotheks-Workflow
-
-```
-# Bibliothek finden und öffnen
-find_libraries("C:\Bibliotheken")
-→ [{"name": "Antriebe", "path": "...Antriebe_V21.al21", "version": "V21", "match": true}]
-
-open_library("C:\Bibliotheken")   ← Ordner angeben, V21 wird auto-gewählt
-→ {"name": "Antriebe", "types": 12, "copies": 5}
-
-# UDT-Struktur lesen
-list_plc_udts("PLC_1")
-→ [{"name": "UDT_Antrieb", "members": [
-     {"name": "Drehzahl", "data_type": "Real", ...},
-     {"name": "Drehzahl_Hi", "data_type": "Real", ...}, ...]}]
-
-# Typ in PLC instanziieren
-use_library_type("PLC_1", "Antriebe", "UDT_Antrieb", "Antriebe")
-
-# Tags anlegen
-create_plc_tag("PLC_1", "Standard_Tags", "Motor1_Start", "Bool", "%M0.0")
-create_hmi_tag("HMI_1", "Antriebe", "Motor1_Drehzahl", "Real",
-               plc_tag="PLC_1.DB1.Drehzahl", high_limit=3000, low_limit=0,
-               logging_enabled=True)
-
-save_project()
-```
-
----
-
-## Typischer Workflow
-
-```
-# 1. Verbinden
-connect_portal()        → attach (laufende TIA-Instanz)
-attach_project()        → offenes Projekt übernehmen
-
-# 2. Orientieren
-list_devices()                   → PLC_1, HMI_1 identifizieren
-list_plc_blocks("PLC_1")         → Bausteinübersicht
-list_plc_tag_tables("PLC_1")     → verfügbare Tabellen
-
-# 3. Arbeiten
-get_plc_block_source("PLC_1", "FB_Motor")   → SCL lesen
-compile_plc("PLC_1")                         → kompilieren
-save_project()                               → speichern
-```
-
----
-
-## Modus 3 — OpenWebUI + Ollama (empfohlen statt bridge.py)
-
-OpenWebUI ist eine Browser-Oberfläche für Ollama mit nativem MCP-Support —
-die komfortablere Alternative zu `bridge.py`, und gleichzeitig ein idealer
-Testclient für `web_server.py` bevor Copilot Studio verfügbar ist.
-
-> `bridge.py` wird damit weitgehend obsolet, bleibt aber im Repo als
-> Fallback für reine Konsolennutzung.
-
-### Einmalige Einrichtung
-
-```powershell
-# Ollama installieren: https://ollama.com/download → Windows
-# Modell herunterladen:
-ollama pull qwen2.5-coder:14b
-
-# OpenWebUI ins .venv installieren:
-.venv\Scripts\activate
-pip install open-webui
-```
-
-### Täglicher Betrieb
-
-```powershell
-start_webui.bat
-```
-
-Die Batch-Datei startet:
-1. TIA Portal (minimiert, 35 Sekunden Wartezeit)
-2. `web_server.py` in eigenem Fenster (Port 8000)
-3. OpenWebUI in eigenem Fenster (Port 3000)
-
-Browser öffnen: **http://localhost:3000**
-
-### MCP-Server einrichten (einmalig im Browser)
-
-```
-Admin Settings → External Tools → Add Server
-  Type:  MCP (Streamable HTTP)       ← nicht OpenAPI!
-  URL:   http://localhost:8000/mcp
-  Auth:  None
-→ Save
-```
-
-Ab dann steht das TIA-Toolset in jedem Chat zur Verfügung —
-Modell im Dropdown wählen, loslegen.
-
-> OpenWebUI v0.6.31 oder neuer erforderlich (MCP-Support ab dieser Version).
-
----
-
-## Modus 4 — Lokales LLM Konsole (bridge.py)
-
-Fallback für reine Konsolennutzung ohne Browser-Oberfläche.
-
-```powershell
-pip install ollama
-ollama pull qwen2.5:14b
-python bridge.py
-```
-
-`bridge.py` startet `server.py` automatisch als Subprozess und verbindet
-Ollama per Function-Calling API mit allen MCP-Tools.
-
-Empfohlene Modelle (CPU-only VM):
-
-| Modell | RAM | Empfehlung |
+| Tool | Parameter | Beschreibung |
 |---|---|---|
-| `qwen2.5-coder:14b` | ~10 GB | Standard — stark bei SCL-Code |
-| `qwen2.5:14b` | ~10 GB | Gut für allgemeine Aufgaben |
-| `mistral-nemo:12b` | ~8 GB | Schneller, etwas schwächer bei Tool-Calls |
+| `list_libraries` | — | Projekt- + Globale Bibliotheken |
+| `list_library_types` | `library_name` | Typen einer Bibliothek |
+| `get_library_type_versions` | `library_name`, `type_name` | Versionen eines Typs |
+| `list_master_copies` | `library_name` | Master Copies |
+
+### Hilfsfunktionen
+
+| Tool | Parameter | Beschreibung |
+|---|---|---|
+| `execute_openness` | `code`, [`mode`] | Python-Code direkt gegen TIA Openness ausführen |
+| `write_import_file` | `filename`, `content` | Datei in `export/import/` schreiben |
+| `read_export_file` | `file_path` | Exportierte Datei lesen |
+| `get_standard_template` | — | Vorlage für Standardstruktur (PLC + HMI + Bibliothek) |
 
 ---
 
-## Bekannte TIA V21 Besonderheiten
+## WinCC-Funktionsumfang nach Bereich
 
-- Keine `Siemens.Engineering.dll` mehr — aufgeteilt in `net48`-Subfolder
-- `SoftwareContainer` liegt unter `Siemens.Engineering.HW.Features`
-- `find_software()` sucht nach **DeviceItem**-Namen (`"PLC_1"`), nicht Station-Namen
-- `ICompilable` nur per Reflection erreichbar
-- Keine rekursiven Funktionen in `execute_openness` — iterativen Stack verwenden
-- `project.HwCatalog` existiert nicht — stattdessen `portal.HardwareCatalog`
+Basierend auf der WinCC-Projektstruktur:
 
----
+| WinCC-Bereich | Export | Import | Anmerkung |
+|---|:---:|:---:|---|
+| **Screens** | ✅ Advanced / ⏭ Unified | ✅ Advanced / ⏭ Unified | Unified: V21-API-Limitation |
+| **Screen management** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **HMI tags** | ✅ | ✅ | Beide Typen vollständig |
+| **Connections** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **HMI alarms** | ❌ | ❌ | V21-Limitation: `DiscreteAlarms.Export()` nicht verfügbar |
+| **Recipes** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **Historical data** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **Scripts** | ✅ | ✅ | Advanced: VBScript, Unified: JS/YML |
+| **Scheduled tasks** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **Cycles** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **Reports** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| **Text and graphic lists** | ❌ | ❌ | V21-Limitation: `TextLists`-Attribut fehlt |
+| **User administration** | ❌ | ❌ | Kein API-Zugriff in V21 |
 
-## Häufige Fehler
-
-| Fehler | Lösung |
-|---|---|
-| `NO_PORTAL_PROCESS` | TIA Portal starten |
-| `ACCESS_DENIED` | Als Administrator starten |
-| `PROJECT_LOCKED` | Anderen Openness-Client beenden |
-| `WRITE_BLOCKED` | `mode='write'` bei `execute_openness` angeben |
-| `Block is inconsistent` | `compile_plc()` aufrufen, dann erneut exportieren |
-| `find_software` → None | DeviceItem-Namen mit `list_devices()` prüfen |
-| Kein Hammer-Symbol | `claude_desktop_config.json` prüfen, venv-Pfad korrekt? |
-| Copilot Studio: Verbindungsfehler | Dev Tunnel läuft? `web_server.py` läuft? Port 8000 frei? |
-| Tunnel-URL ändert sich | Benannten Tunnel verwenden: `devtunnel create tia-mcp` |
-
-Logs: `C:\tia-mcp\logs\tia_mcp.log`
+> Die ❌-Bereiche sind Einschränkungen der TIA Portal Openness API V21 — nicht des MCP-Servers. Siemens öffnet diese APIs ggf. in späteren Versionen (V22+).
 
 ---
 
-## Projektstruktur (geplant / in Entwicklung)
+## Funktionsumfang — Detailanalyse
 
-- **PLCSim Advanced** — `plcsim.py` / `plcsim_server.py` via `Siemens.Simatic.Simulation.Runtime` API
-- **Anlagensimulator** — Python-Loop mit snap7, lokales Ollama-Modell als Prozesssimulation
-- **Validierungs-Framework** — `validate_project` Tool mit 10 internen Prüfstufen, Excel-Report
-- **HMI-Tag-Automation** — Extraktion analoger DB-Variablen → Excel-Review → automatische Tag-Anlage
+### PLC
+
+| Aufgabe | Tool | Status |
+|---|---|:---:|
+| Geräte auflisten | `get_project_info`, `list_devices` | ✅ |
+| Bausteine auflisten | `list_plc_blocks` | ✅ inkl. Untergruppen + Gruppenfilter |
+| Tag-Tabellen auflisten | `list_plc_tag_tables` | ✅ inkl. Untergruppen |
+| Tags auflisten | `list_plc_tags` | ✅ mit Typ, Adresse, Kommentar |
+| UDTs auflisten | `list_plc_udts` | ✅ inkl. Untergruppen |
+| Bausteine lesen (SCL) | `get_plc_block_source` | ✅ |
+| Bausteine exportieren (XML) | `export_plc_block` | ✅ |
+| Bausteine importieren | `import_plc_block` | ✅ |
+| SCL schreiben | `set_plc_block_source` | ⚠️ nur einfache Anweisungen |
+| Kompilieren | `compile_plc` | ✅ |
+| Tag-Tabellen exportieren | `export_plc_tagtable` | ✅ |
+| Tag-Tabellen importieren | `import_plc_tagtable` | ✅ |
+| Bausteine auflisten | — | ❌ fehlt |
+| Tag-Tabellen auflisten | — | ❌ fehlt |
+| UDTs lesen / exportieren | — | ❌ fehlt |
+| DB-Inhalte lesen | — | ❌ fehlt |
+| Bausteine löschen | — | ❌ fehlt |
+
+### WinCC Advanced (HmiTarget — z.B. KP/TP Comfort)
+
+| Aufgabe | Tool | Status |
+|---|---|:---:|
+| Screens auflisten | `list_hmi_screens` | ✅ |
+| Screen exportieren | `export_hmi_screen`, `export_hmi_screens_all` | ✅ |
+| Screen importieren | `import_hmi_screen` | ✅ |
+| Tags auflisten | `list_hmi_tags` | ✅ |
+| Tags exportieren | `export_hmi_tags`, `export_hmi_tagtable` | ✅ |
+| Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
+| Scripts exportieren | `export_hmi_scripts` | ✅ VBScript |
+| Scripts importieren | `import_hmi_scripts` | ✅ VBScript |
+| Alarme auflisten | `list_hmi_alarms` | ⚠️ V21: immer `[]` |
+| Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
+| Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
+| Tags anlegen / löschen | — | ❌ fehlt |
+| Connections lesen | — | ❌ fehlt |
+| Rezepte | — | ❌ V21-Limit |
+
+### WinCC Unified (HmiSoftware)
+
+| Aufgabe | Tool | Status |
+|---|---|:---:|
+| Screens auflisten | `list_hmi_screens` | ✅ |
+| Screen exportieren | `export_hmi_screen`, `export_hmi_screens_all` | ❌ V21-Limit |
+| Screen importieren | `import_hmi_screen` | ❌ V21-Limit |
+| Tags auflisten | `list_hmi_tags` | ✅ |
+| Tags exportieren | `export_hmi_tags`, `export_hmi_tagtable` | ✅ |
+| Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
+| Alarme auflisten | `list_hmi_alarms` | ✅ |
+| Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
+| Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
+| Scripts exportieren | `export_hmi_scripts` | ✅ JS/YML |
+| Scripts importieren | `import_hmi_scripts` | ✅ |
+| Tags anlegen / löschen | — | ❌ fehlt |
+| Connections lesen | — | ❌ fehlt |
+
+### Bibliotheken
+
+| Aufgabe | Tool | Status |
+|---|---|:---:|
+| Bibliotheken auflisten | `list_libraries` | ✅ |
+| Typen auflisten | `list_library_types` | ✅ |
+| Typ-Versionen | `get_library_type_versions` | ✅ |
+| Master Copies auflisten | `list_master_copies` | ✅ |
+| Typ exportieren | — | ❌ fehlt |
+| Typ importieren / instanziieren | — | ❌ fehlt |
+| Master Copy verwenden | — | ❌ fehlt |
+| Globale Bibliothek laden | — | ❌ fehlt |
+
+---
+
+## Roadmap — Fehlende Tools
+
+Tools die noch nicht implementiert sind, nach Priorität:
+
+| Prio | Tool | Bereich | Status |
+|---|---|---|---|
+| ~~🔴 HOCH~~ | ~~`list_plc_blocks`~~ | PLC | ✅ v1.3.0 |
+| ~~🔴 HOCH~~ | ~~`list_plc_tag_tables`~~ | PLC | ✅ v1.3.0 |
+| ~~🔴 HOCH~~ | ~~`list_plc_tags`~~ | PLC | ✅ v1.3.0 |
+| ~~🔴 HOCH~~ | ~~`list_plc_udts`~~ | PLC | ✅ v1.3.0 |
+| 🟠 MITTEL | `export_plc_udt` / `import_plc_udt` | PLC | UDTs zwischen Projekten transferieren |
+| 🟠 MITTEL | `create_hmi_tag` | HMI | Tags programmatisch anlegen ohne XML-Umweg |
+| 🟠 MITTEL | `delete_hmi_tag` | HMI | Tags löschen / bereinigen |
+| 🟡 NIEDRIG | `list_plc_block_groups` | PLC | Ordnerstruktur der Bausteine (bereits in list_plc_blocks enthalten) |
+| 🟡 NIEDRIG | `export_library_type` | Bibliothek | Bibliothekstypen sichern |
+| 🟡 NIEDRIG | `use_library_type` | Bibliothek | Typ in Projekt instanziieren |
+| 🟡 NIEDRIG | `get_cross_references` | PLC/HMI | Querverweise zwischen Tags und Bausteinen |
+
+> V21-Limitationen (Alarme, Textlisten, Unified Screens, Rezepte) können nicht durch neue Tools umgangen werden — das ist eine Einschränkung der TIA Openness API selbst, nicht des MCP-Servers.
+
+---
+
+## Advanced vs. Unified — Unterschiede
+
+| | WinCC Advanced (HmiTarget) | WinCC Unified (HmiSoftware) |
+|---|---|---|
+| Typ-Erkennung | `Siemens.Engineering.Hmi.HmiTarget` | `Siemens.Engineering.HmiUnified.HmiSoftware` |
+| Screen-API | `ScreenFolder.Folders → Screens` | `ScreenGroups → Screens` |
+| Tag-API | `TagFolder.TagTables` | `TagTables` direkt |
+| Tag-Export | `table.Export(FileInfo)` → XML | `table.Tags.Export(DirectoryInfo)` → Ordner |
+| Script-API | `VBScriptFolder.VBScripts` | `Scripts` Collection |
+| Screen-Export | ✅ `s.Export(FileInfo)` | ❌ V21-Limitation |
+| Alarm-API | Kein `DiscreteAlarms`-Export | Kein `DiscreteAlarms`-Export |
+
+---
+
+## Bekannte Einschränkungen (V21)
+
+- **`open_portal`** kann auf manchen Systemen >4 Minuten dauern → Timeout. Workaround: TIA manuell starten, dann `connect_portal`.
+- **`project.Save()` in `execute_openness`** — nicht unterstützt, disposed Projekt-Handle. Immer `save_project`-Tool verwenden.
+- **`CreateFB()` in `execute_openness`** — nur ProDiag. Neue Bausteine per XML-Import anlegen.
+- **STA-Thread-Timeout:** Hängende API-Aufrufe werden nach 60 Sekunden abgebrochen. Der Server bleibt verfügbar, Session-Handles werden zurückgesetzt → `connect_portal` + `attach_project` erneut aufrufen.
+- **Unified Screen-Export** — Screens sind in binären DB-Dateien eingebettet, kein Zugriff über Openness möglich.
+
+---
+
+## Fehlerformat
+
+Alle Fehler folgen diesem Schema:
+
+```json
+{
+  "status": "error",
+  "code": "BLOCK_NOT_FOUND",
+  "message": "Baustein 'XYZ' nicht gefunden.",
+  "recoverable": true,
+  "details": {
+    "available": ["Main", "FC_MCP_Test"]
+  }
+}
+```
+
+`recoverable: true` = Fehler durch andere Parameter behebbar. `recoverable: false` = Systemlimitation.
+
+---
+
+## Changelog
+
+| Version | Datum | Änderungen |
+|---|---|---|
+| 1.3.0 | 2026-06-15 | `list_plc_blocks`, `list_plc_tag_tables`, `list_plc_tags`, `list_plc_udts` — PLC vollständig lesbar |
+| 1.2.0 | 2026-06-14 | BUG-11–14 gefixt: rekursive Screen-Suche, Unified-Typ-Erkennung, HmiTarget-API-Support, import_hmi_screen mit XML-basiertem Delete-vor-Import |
+| 1.1.0 | 2026-06-14 | STA-Timeout + Auto-Restart, export_hmi_tags Unified-Workaround, VBScriptFolder-Support, import_hmi_scripts Advanced/Unified |
+| 1.0.0 | 2026-06-14 | Erster stabiler Release: 10 Bugs gefixt, Advanced/Unified-Weiche, alle HMI-Tools, PLC-Tools vollständig |

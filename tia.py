@@ -6,14 +6,15 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.4.0"
-VERSION_DATE = "2026-06-15"
+VERSION      = "1.6.0"
+VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
-        "1.4.0: BUG-15 Fix: list_plc_tags comment-Feld via _mltext() korrekt auslesen",
+        "1.6.0: get/set/export_hmi_runtime_settings — Unified Runtime-Einstellungen lesen, schreiben, exportieren",
+        "1.5.0: export_hw_config — Hardware-Konfiguration als Excel exportieren",
         "1.4.0: BUG-15 Fix: list_plc_tags comment-Feld via _mltext() korrekt auslesen",
         "1.3.0: list_plc_blocks — alle Bausteine inkl. Untergruppen, optionaler Gruppenfilter",
         "1.3.0: list_plc_tag_tables — alle Tag-Tabellen inkl. Untergruppen",
@@ -464,6 +465,236 @@ def list_devices():
             result.append({"name": device.Name, "software": sw_list})
         return {"devices": result, "count": len(result)}
     return sta.run(_tia_call, _run)
+
+def export_hw_config(output_path=None):
+    def _run():
+        _sess.ensure_project()
+        rows = []
+        for device in _iter_all_devices(_sess.project):
+            station = device.Name
+            item_stack = [(item, 0) for item in device.DeviceItems]
+            while item_stack:
+                entry = item_stack.pop()
+                di, depth = entry[0], entry[1]
+                type_id = str(di.TypeIdentifier) if di.TypeIdentifier else ""
+                ip = ""
+                try:
+                    v = di.GetAttribute("Address")
+                    if v: ip = str(v)
+                except Exception:
+                    pass
+                rows.append({
+                    "Station":       station,
+                    "Depth":         depth,
+                    "Name":          str(di.Name),
+                    "TypeIdentifier": type_id,
+                    "Position":      str(getattr(di, "PositionNumber", "")),
+                    "IP":            ip,
+                })
+                for sub in di.DeviceItems:
+                    item_stack.append((sub, depth + 1))
+        return rows
+
+    rows = sta.run(_tia_call, _run)
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise TiaError("MISSING_DEPENDENCY", "openpyxl nicht installiert. pip install openpyxl", False)
+
+    out = Path(output_path) if output_path else Path(_DEFAULT_EXPORT) / "hardware_config.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Hardware"
+
+    thin   = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    headers    = ["Station", "Komponente", "Bestellnummer", "Steckplatz", "IP-Adresse"]
+    col_widths = [30, 42, 38, 12, 18]
+
+    for col, (h, w) in enumerate(zip(headers, col_widths), 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        c.fill      = PatternFill("solid", start_color="1F4E79")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border    = border
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 22
+
+    prev_station = None
+    for r, row in enumerate(rows, 2):
+        s      = row["Station"]
+        indent = "   " * row["Depth"]
+        tid    = row["TypeIdentifier"].replace("OrderNumber:", "") if row["TypeIdentifier"] else ""
+        bold   = row["Depth"] == 0
+        bg     = "D6E4F0" if s != prev_station else ("EAF4FB" if row["Depth"] == 0 else "F5FBFF")
+        fill   = PatternFill("solid", start_color=bg)
+        vals   = [s if s != prev_station else "", indent + row["Name"], tid, row["Position"], row["IP"]]
+        for col, val in enumerate(vals, 1):
+            c           = ws.cell(row=r, column=col, value=val)
+            c.font      = Font(name="Arial", size=10, bold=bold)
+            c.fill      = fill
+            c.border    = border
+            c.alignment = Alignment(vertical="center")
+        prev_station = s
+
+    ws.freeze_panes  = "A2"
+    ws.auto_filter.ref = f"A1:E{len(rows) + 1}"
+    wb.save(str(out))
+    return {"status": "ok", "file": str(out), "rows": len(rows)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HMI RUNTIME SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rs_to_dict(obj, depth=0):
+    """RuntimeSettings-Objekt rekursiv in dict umwandeln (max. 3 Ebenen)."""
+    if obj is None or depth > 3:
+        return None
+    result = {}
+    for ai in obj.GetAttributeInfos():
+        name = str(ai.Name)
+        val  = obj.GetAttribute(name)
+        if val is None:
+            result[name] = None
+        elif hasattr(val, "GetAttributeInfos"):
+            result[name] = _rs_to_dict(val, depth + 1)
+        else:
+            s = str(val)
+            if s in ("True", "False"):
+                result[name] = s == "True"
+            else:
+                result[name] = s
+    return result
+
+
+def _get_hmi_rs(device_name):
+    """Unified HmiSoftware + RuntimeSettings-Objekt zurückgeben."""
+    import Siemens.Engineering as eng
+    sw_type = _get_sw_container_type()
+    for device in _iter_all_devices(_sess.project):
+        for item in device.DeviceItems:
+            sw = _try_get_software(item, "", sw_type, eng)
+            if sw and item.Name == device_name:
+                rs = sw.GetAttribute("RuntimeSettings")
+                if rs is None:
+                    raise TiaError("NO_RUNTIME_SETTINGS",
+                                   f"'{device_name}' hat kein RuntimeSettings-Attribut (nur Unified unterstützt).", False)
+                return sw, rs
+    raise TiaError("HMI_NOT_FOUND", f"HMI '{device_name}' nicht gefunden.", True)
+
+
+def get_hmi_runtime_settings(device_name):
+    def _run():
+        _sess.ensure_project()
+        _, rs = _get_hmi_rs(device_name)
+        return {"status": "ok", "device": device_name, "settings": _rs_to_dict(rs)}
+    return sta.run(_tia_call, _run)
+
+
+def set_hmi_runtime_settings(device_name, settings: dict):
+    """Setzt einfache (nicht-verschachtelte) RuntimeSettings-Werte."""
+    def _run():
+        _sess.ensure_project()
+        _, rs = _get_hmi_rs(device_name)
+        applied, skipped = [], []
+        for key, val in settings.items():
+            v = rs.GetAttribute(key)
+            if v is not None and hasattr(v, "GetAttributeInfos"):
+                skipped.append(key)
+                continue
+            rs.SetAttribute(key, val)
+            applied.append(key)
+        return {"status": "ok", "device": device_name, "applied": applied, "skipped_complex": skipped}
+    return sta.run(_tia_call, _run)
+
+
+def export_hmi_runtime_settings(device_name, output_path=None):
+    def _run():
+        _sess.ensure_project()
+        _, rs = _get_hmi_rs(device_name)
+        return _rs_to_dict(rs)
+
+    settings = sta.run(_tia_call, _run)
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise TiaError("MISSING_DEPENDENCY", "openpyxl nicht installiert. pip install openpyxl", False)
+
+    out = Path(output_path) if output_path else Path(_DEFAULT_EXPORT) / f"hmi_runtime_{device_name}.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "RuntimeSettings"
+
+    thin   = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    headers    = ["Einstellung", "Wert", "Gruppe"]
+    col_widths = [42, 36, 30]
+    for col, (h, w) in enumerate(zip(headers, col_widths), 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        c.fill      = PatternFill("solid", start_color="1F4E79")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border    = border
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.row_dimensions[1].height = 22
+
+    grp_fill  = PatternFill("solid", start_color="D6E4F0")
+    val_fill  = PatternFill("solid", start_color="F5FBFF")
+    alt_fill  = PatternFill("solid", start_color="EAF4FB")
+
+    r = 2
+    for key, val in settings.items():
+        if isinstance(val, dict):
+            c = ws.cell(row=r, column=1, value=key)
+            c.font   = Font(name="Arial", bold=True, size=10)
+            c.fill   = grp_fill
+            c.border = border
+            ws.cell(row=r, column=2).fill   = grp_fill
+            ws.cell(row=r, column=2).border = border
+            ws.cell(row=r, column=3).fill   = grp_fill
+            ws.cell(row=r, column=3).border = border
+            r += 1
+            for sub_key, sub_val in val.items():
+                fill = val_fill if r % 2 == 0 else alt_fill
+                ws.cell(row=r, column=1, value=f"  {sub_key}").fill   = fill
+                ws.cell(row=r, column=1).font   = Font(name="Arial", size=10)
+                ws.cell(row=r, column=1).border = border
+                ws.cell(row=r, column=1).alignment = Alignment(vertical="center")
+                ws.cell(row=r, column=2, value=str(sub_val) if sub_val is not None else "").fill   = fill
+                ws.cell(row=r, column=2).font   = Font(name="Arial", size=10)
+                ws.cell(row=r, column=2).border = border
+                ws.cell(row=r, column=3, value=key).fill   = fill
+                ws.cell(row=r, column=3).font   = Font(name="Arial", size=10, color="808080")
+                ws.cell(row=r, column=3).border = border
+                r += 1
+        else:
+            fill = val_fill if r % 2 == 0 else alt_fill
+            ws.cell(row=r, column=1, value=key).fill   = fill
+            ws.cell(row=r, column=1).font   = Font(name="Arial", size=10, bold=True)
+            ws.cell(row=r, column=1).border = border
+            ws.cell(row=r, column=1).alignment = Alignment(vertical="center")
+            ws.cell(row=r, column=2, value=str(val) if val is not None else "").fill   = fill
+            ws.cell(row=r, column=2).font   = Font(name="Arial", size=10)
+            ws.cell(row=r, column=2).border = border
+            ws.cell(row=r, column=3).fill   = fill
+            ws.cell(row=r, column=3).border = border
+            r += 1
+
+    ws.freeze_panes = "A2"
+    wb.save(str(out))
+    return {"status": "ok", "file": str(out), "device": device_name, "settings_count": len(settings)}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HMI

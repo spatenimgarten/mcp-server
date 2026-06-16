@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.4.0"
+VERSION      = "1.6.0"
 VERSION_DATE = "2026-06-16"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -36,7 +36,7 @@ _com_lock   = None          # asyncio.Lock — serialisiert COM-Zugriffe im Prim
 # einem Thread und geben sofort "pending" zurück. get_session_status zeigt den
 # aktuellen Stand. Nur im Primär relevant.
 
-_LONG_RUNNING = {"open_project", "create_project", "compile_plc", "close_portal", "execute_openness"}
+_LONG_RUNNING = {"open_project", "create_project", "compile_plc", "close_portal"}
 
 _bg_lock   = threading.Lock()
 _bg_status = {"running": False, "tool": None, "result": None, "error": None}
@@ -53,8 +53,7 @@ async def _rpc_handle_client(reader: asyncio.StreamReader, writer: asyncio.Strea
         if tool in _LONG_RUNNING:
             result = _start_bg(tool, args)
         else:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: _dispatch(tool, args))
+            result = _dispatch(tool, args)
         response = json.dumps({"ok": True, "result": result}, ensure_ascii=False)
     except TiaError as e:
         response = json.dumps({"ok": False, "error": e.to_dict()}, ensure_ascii=False)
@@ -489,6 +488,29 @@ async def list_tools():
         T("get_version", "Versionen von server.py und tia.py mit Changelog."),
         T("get_project_info",   "Projektinfo und Geraete."),
         T("list_devices",       "Alle Geraete mit HMI-Typ."),
+        T("get_hmi_runtime_settings",
+          "HMI Runtime-Einstellungen auslesen (nur WinCC Unified). "
+          "Gibt alle Einstellungen rekursiv als JSON zurück. "
+          "Kann als Basis für set_hmi_runtime_settings verwendet werden.",
+          {"device_name": {"type": "string"}}, ["device_name"]),
+        T("set_hmi_runtime_settings",
+          "HMI Runtime-Einstellungen schreiben (nur WinCC Unified). "
+          "settings = dict mit Schlüssel/Wert-Paaren (nur einfache Werte, keine Unterstrukturen). "
+          "Vorher get_hmi_runtime_settings aufrufen um verfügbare Schlüssel zu sehen.",
+          {"device_name": {"type": "string"},
+           "settings":    {"type": "object", "description": "Key-Value-Paare z.B. {\"StartScreen\": \"Startbild\", \"GMPEnabled\": true}"}},
+          ["device_name", "settings"]),
+        T("export_hmi_runtime_settings",
+          "HMI Runtime-Einstellungen als Excel exportieren (nur WinCC Unified). "
+          f"Standard: {_DEFAULT_EXPORT}\\hmi_runtime_<device>.xlsx",
+          {"device_name":  {"type": "string"},
+           "output_path":  {"type": "string", "description": "Optional: anderer Exportpfad (.xlsx)"}},
+          ["device_name"]),
+        T("export_hw_config",
+          "Hardware-Konfiguration aller Geraete als Excel exportieren. "
+          "Liefert Station, Komponente, Bestellnummer, Steckplatz, IP-Adresse. "
+          f"Standard-Exportpfad: {_DEFAULT_EXPORT}\\hardware_config.xlsx",
+          {"output_path": {"type": "string", "description": "Optional: anderer Exportpfad (.xlsx)"}}),
         T("list_hmi_screens",   "Screens eines HMI.",
           {"device_name":{"type":"string"}}, ["device_name"]),
         T("list_hmi_tags",      "Tags eines HMI, optional nach Tabelle.",
@@ -688,8 +710,7 @@ async def call_tool(name, arguments):
                 result = _start_bg(name, a)
             else:
                 async with _com_lock:
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, lambda: _dispatch(name, a))
+                    result = _dispatch(name, a)
         else:
             result = await _rpc_call(name, a)
         return [types.TextContent(type="text",
@@ -733,6 +754,10 @@ def _dispatch(name, a):
                                            }
         case "get_project_info":           return tia.get_project_info()
         case "list_devices":               return tia.list_devices()
+        case "export_hw_config":                return tia.export_hw_config(a.get("output_path"))
+        case "get_hmi_runtime_settings":        return tia.get_hmi_runtime_settings(a["device_name"])
+        case "set_hmi_runtime_settings":        return tia.set_hmi_runtime_settings(a["device_name"], a["settings"])
+        case "export_hmi_runtime_settings":     return tia.export_hmi_runtime_settings(a["device_name"], a.get("output_path"))
         case "list_hmi_screens":           return tia.list_hmi_screens(a["device_name"])
         case "list_hmi_tags":              return tia.list_hmi_tags(a["device_name"],a.get("table_name"))
         case "list_hmi_alarms":            return tia.list_hmi_alarms(a["device_name"])

@@ -1,7 +1,7 @@
 # TIA Portal MCP Server — Validierungs-Checkliste
 
 `server.py · tia.py  —  TIA Portal V21 Openness`  
-49 registrierte MCP-Tools.
+54 registrierte MCP-Tools.
 
 **Zweck:** Vor jedem Release / Commit prüfen ob alle MCP-Tools korrekt reagieren.  
 **Testprojekt Advanced:** `F:\02_Projekte\AI\Projekt2\Projekt2.ap21` · PLC: `PLC_1` · HMI: `HMI_Station_1`, `HMI_Station_2`  
@@ -116,6 +116,41 @@
 | 6b.1 | `list_hmi_cycles` | `device_name=<HMI>` | 🔄 | 🔄 | Erwartet: Liste mit Name, Periode, Einheit. Bei V21-Limit: `note`-Feld + `count:0`. |
 | 6b.2 | `list_hmi_scheduled_tasks` | `device_name=<HMI>` | 🔄 | 🔄 | Erwartet: Liste mit Name, Trigger, Intervall, Funktion, Enabled. |
 | 6b.3 | `list_hmi_cycles` | `device_name="GIBT_ES_NICHT"` | 🔄 | — | Erwartet: `HMI_NOT_FOUND, recoverable:true`. |
+
+---
+
+## 6c — HMI: Verbindungen — v1.10.0
+
+> `list_hmi_connections` liest **nicht-integrierte** Verbindungen. Integrierte Verbindungen (TIA-Netzwerktopologie) sind in V21 nicht über die API zugänglich.  
+> Unified: Verbindung auf `HmiSoftware`-Item. Advanced: `ConnectionComposition` existiert, integrierte Verbindung nicht sichtbar.
+
+| # | Tool | Parameter | Advanced | Unified | Notiz |
+|---|---|---|:---:|:---:|---|
+| 6c.1 | `list_hmi_connections` | `device_name=<HMI>` | ✅ | ✅ | [Adv] count:0 — integrierte Verbindung nicht zugänglich. [Uni] count:1, liefert CommunicationDriver, Partner, Station, Node, InitialAddress. |
+| 6c.2 | `list_hmi_connections` | `device_name="GIBT_ES_NICHT"` | 🔄 | — | Erwartet: `HMI_NOT_FOUND`. |
+
+---
+
+## 6d — HMI: Textlisten — v1.10.0 Fix
+
+> `list_hmi_textlists` war gebrochen (immer count:0). Fix: durchsucht jetzt alle Software-Objekte der Station. Advanced: TextLists auf `HMI_Advanced`-Item. Unified: V21-Limitation.
+
+| # | Tool | Parameter | Advanced | Unified | Notiz |
+|---|---|---|:---:|:---:|---|
+| 6d.1 | `list_hmi_textlists` | `device_name=<HMI>` | 🔄 | ⏭ | [Adv] Erwartet count ≥ 1 wenn Textlisten vorhanden. [Uni] V21-Limit — `count:0`. |
+
+---
+
+## 6e — HMI: Datenlogs — v1.11.0 / v1.12.0
+
+> `list_hmi_logs` und `set_hmi_log` funktionieren nur für Unified (`HmiSoftware.DataLogs`). Advanced hat kein `DataLogs`-Attribut (V21-Limit).
+
+| # | Tool | Parameter | Advanced | Unified | Notiz |
+|---|---|---|:---:|:---:|---|
+| 6e.1 | `list_hmi_logs` | `device_name=<HMI>` | ⏭ | ✅ | [Uni] Liefert Name, SegmentMaxSize, SegmentStartTime, LogMaxSize, StorageDevice, Backup. [Adv] `note`-Feld + count:0. |
+| 6e.2 | `set_hmi_log` | `device_name=<Unified>, log_name=<name>, settings={"LogMaxSize":"2000"}` | ⏭ | 🔄 | [Uni] Erwartet `applied:["LogMaxSize"]`. |
+| 6e.3 | `set_hmi_log` | `settings={"LogTimePeriod":"..."}` | ⏭ | 🔄 | Erwartet `skipped_readonly:["LogTimePeriod"]`. |
+| 6e.4 | `set_hmi_log` | `log_name="GIBT_ES_NICHT"` | ⏭ | 🔄 | Erwartet `LOG_NOT_FOUND, available:[...]`. |
 
 ---
 
@@ -328,5 +363,6 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | V1.3 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.7.0: `get/set/export_plc_config`. Abschnitt 5b in TESTING.md ergänzt. |
 | V1.4 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.8.0: `get/set/export_hmi_config` mit Advanced/Unified-Weiche. Abschnitt 7b um neue Tools erweitert. Tool-Zähler auf 47. |
 | V1.5 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.9.0: `list_hmi_cycles`, `list_hmi_scheduled_tasks`. Abschnitt 6b angelegt. Tool-Zähler auf 49. |
+| V1.6 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.10–1.12: `list_hmi_connections`, `list_hmi_textlists`-Fix, `list_hmi_logs`, `set_hmi_log`. Abschnitte 6c–6e. Tool-Zähler auf 54. |
 
 | V0.6 | 2026-06-13 | Claude Sonnet 4.6 | Advanced/Unified-Weiche für alle HMI-Tools. Neue Hilfsfunktionen: `_hmi_screens()`, `_hmi_screens_import()`, `_hmi_screen_folders()`, `_hmi_tag_folders()`. Neues Tool: `create_hmi_structure`. Testabschnitte 6+7 um Unified-Spalte erweitert. README: API-Unterschiede-Tabelle ergänzt. |

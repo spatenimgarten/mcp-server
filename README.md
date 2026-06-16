@@ -148,11 +148,14 @@ attach_project / open_project
 | `list_hmi_screens` | `device_name` | Alle Screens (Advanced + Unified) |
 | `list_hmi_tags` | `device_name`, [`table_name`] | HMI-Tags (optional gefiltert) |
 | `list_hmi_alarms` | `device_name` | Alarme (Unified: discrete + analog) |
-| `list_hmi_cycles` | `device_name` | Erfassungszyklen (Name, Periode, Einheit) |
-| `list_hmi_scheduled_tasks` | `device_name` | Geplante Tasks (Trigger, Intervall, Funktion) |
-| `list_hmi_textlists` | `device_name` | Textlisten² |
+| `list_hmi_connections` | `device_name` | HMI-Verbindungen (Advanced + Unified)² |
+| `list_hmi_cycles` | `device_name` | Erfassungszyklen — Advanced: Name + Periode; Unified: V21-Limit |
+| `list_hmi_scheduled_tasks` | `device_name` | Geplante Tasks — Advanced + Unified: V21-Limit |
+| `list_hmi_logs` | `device_name` | Datenlogs auslesen (Unified) — Name, Segmentgröße, Speicher, Backup |
+| `list_hmi_textlists` | `device_name` | Textlisten (Advanced)³ |
 
-² V21-Limitation: `TextLists`-Attribut nicht verfügbar — gibt immer `count:0` zurück.
+² Nur **nicht-integrierte** Verbindungen zugänglich. Integrierte Verbindungen (TIA-Netzwerktopologie) sind in V21 nicht über die API erreichbar.  
+³ V21-Limitation Unified: `TextLists` nicht verfügbar.
 
 ### HMI: Export & Import
 
@@ -180,6 +183,8 @@ attach_project / open_project
 | `get_hmi_config` | `device_name` | HMI-Gerätekonfiguration auslesen — Advanced **und** Unified (IP, Display, Runtime …); Unified zusätzlich mit RuntimeSettings |
 | `set_hmi_config` | `device_name`, `settings` | HMI-Gerätekonfiguration schreiben — Advanced und Unified; Unified schreibt auch RuntimeSettings-Keys |
 | `export_hmi_config` | `device_name`, [`output_path`] | Excel-Export: Advanced = 1 Sheet blau; Unified = Sheet Gerät (grün) + Sheet RuntimeSettings |
+| `list_hmi_logs` | `device_name` | Datenlogs auslesen (Unified) |
+| `set_hmi_log` | `device_name`, `log_name`, `settings` | Datenlog-Einstellungen schreiben — Name, SegmentMaxSize, LogMaxSize, StorageDevice, StorageFolder |
 | `get_hmi_runtime_settings` | `device_name` | Runtime-Einstellungen auslesen (nur Unified) |
 | `set_hmi_runtime_settings` | `device_name`, `settings` | Runtime-Einstellungen schreiben (nur Unified) |
 | `export_hmi_runtime_settings` | `device_name`, [`output_path`] | Runtime-Einstellungen als Excel (nur Unified) |
@@ -276,8 +281,10 @@ Basierend auf der WinCC-Projektstruktur:
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem-Attribute (IP, Display, Runtime …) |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ skalare Attribute |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, gruppiert |
-| Erfassungszyklen auflisten | `list_hmi_cycles` | 🔄 zu testen |
-| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | 🔄 zu testen |
+| Verbindungen auflisten | `list_hmi_connections` | ✅ nur nicht-integrierte |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | ✅ Advanced — Name, Periode, system-Flag |
+| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
+| Textlisten auflisten | `list_hmi_textlists` | ✅ Advanced |
 | Alarme auflisten | `list_hmi_alarms` | ⚠️ V21: immer `[]` |
 | Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
 | Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
@@ -303,10 +310,13 @@ Basierend auf der WinCC-Projektstruktur:
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, 2 Sheets |
-| Erfassungszyklen auflisten | `list_hmi_cycles` | 🔄 zu testen |
-| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | 🔄 zu testen |
+| Verbindungen auflisten | `list_hmi_connections` | ✅ nur nicht-integrierte |
+| Datenlogs auslesen | `list_hmi_logs` | ✅ Unified |
+| Datenlog schreiben | `set_hmi_log` | ✅ Unified |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | ❌ V21-Limit Unified |
+| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
+| Textlisten auflisten | `list_hmi_textlists` | ❌ V21-Limit Unified |
 | Tags anlegen / löschen | — | ❌ fehlt |
-| Connections lesen | — | ❌ fehlt |
 
 ### Bibliotheken
 
@@ -393,7 +403,10 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
-| 1.9.0 | 2026-06-16 | `list_hmi_cycles`, `list_hmi_scheduled_tasks` — Erfassungszyklen und geplante Tasks (Advanced + Unified) |
+| 1.12.0 | 2026-06-16 | `set_hmi_log` — Unified DataLog-Einstellungen schreiben (Name, Segment, Storage) |
+| 1.11.0 | 2026-06-16 | `list_hmi_logs` — Unified DataLogs mit Segment, Settings, Backup |
+| 1.10.0 | 2026-06-16 | `list_hmi_connections` — nicht-integrierte HMI-Verbindungen; `list_hmi_textlists` Fix (sucht alle Items) |
+| 1.9.0 | 2026-06-16 | `list_hmi_cycles`, `list_hmi_scheduled_tasks` — Erfassungszyklen (Advanced ✅, Unified ❌) und geplante Tasks (V21-Limit) |
 | 1.8.0 | 2026-06-16 | `get_hmi_config`, `set_hmi_config`, `export_hmi_config` — HMI-DeviceItem-Attribute für Advanced und Unified; Unified-Excel mit RuntimeSettings-Sheet |
 | 1.7.0 | 2026-06-16 | `get_plc_config`, `set_plc_config`, `export_plc_config` — CPU-Konfigurationsattribute lesen, schreiben und als Excel exportieren |
 | 1.6.0 | 2026-06-16 | `get_hmi_runtime_settings`, `set_hmi_runtime_settings`, `export_hmi_runtime_settings` — WinCC Unified Runtime-Einstellungen |

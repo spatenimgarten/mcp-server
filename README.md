@@ -218,27 +218,30 @@ attach_project / open_project
 
 ---
 
-## WinCC-Funktionsumfang nach Bereich
+## HMI-Funktionsumfang nach Bereich
 
-Basierend auf der WinCC-Projektstruktur:
+Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠️ eingeschränkt · ❌ V21-Limit · — fehlt noch
 
-| WinCC-Bereich | Export | Import | Anmerkung |
-|---|:---:|:---:|---|
-| **Screens** | ✅ Advanced / ⏭ Unified | ✅ Advanced / ⏭ Unified | Unified: V21-API-Limitation |
-| **Screen management** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **HMI tags** | ✅ | ✅ | Beide Typen vollständig |
-| **Connections** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **HMI alarms** | ❌ | ❌ | V21-Limitation: `DiscreteAlarms.Export()` nicht verfügbar |
-| **Recipes** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **Historical data** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **Scripts** | ✅ | ✅ | Advanced: VBScript, Unified: JS/YML |
-| **Scheduled tasks** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **Cycles** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **Reports** | ❌ | ❌ | Kein API-Zugriff in V21 |
-| **Text and graphic lists** | ❌ | ❌ | V21-Limitation: `TextLists`-Attribut fehlt |
-| **User administration** | ❌ | ❌ | Kein API-Zugriff in V21 |
+| TIA-Bereich | Tool | Advanced | Unified | Anmerkung |
+|---|---|:---:|:---:|---|
+| **Runtime settings** | `get/set/export_hmi_config` | ✅ | ✅ | Unified zusätzlich mit RuntimeSettings-Sheet |
+| **Screens** | `list/export/import_hmi_screen(s)` | ✅ | ⚠️ | Unified: nur list; Export/Import V21-Limit |
+| **Screen management** | — | ❌ | ❌ | V21-Limit |
+| **HMI tags** | `list/export/import_hmi_tags` | ✅ | ✅ | |
+| **Connections** | `list_hmi_connections` | ⚠️ | ✅ | Nur nicht-integrierte; integrierte V21-Limit |
+| **HMI alarms** | `list_hmi_alarms` | ❌ | ✅ | Advanced: immer `[]` (V21-Limit) |
+| **Recipes** | — | ❌ | ❌ | V21-Limit |
+| **Historical data / Logs** | `list_hmi_logs`, `set_hmi_log` | ❌ | ✅ | Advanced: DataLogs nicht zugänglich |
+| **Scripts** | `export/import_hmi_scripts` | ✅ | ✅ | Advanced: VBScript · Unified: JS/YML |
+| **Scheduled tasks** | `list_hmi_scheduled_tasks` | ❌ | ❌ | V21-Limit — ScheduledTaskFolder nicht zugänglich |
+| **Cycles** | `list_hmi_cycles` | ✅ | ❌ | Advanced: Name, Periode, system-Flag · Unified: V21-Limit |
+| **Reporting / Reports** | — | ❌ | ❌ | V21-Limit |
+| **Parameter set types** | — | — | ❌ | V21-Limit Unified |
+| **Collaboration data** | — | — | ❌ | V21-Limit Unified |
+| **Text and graphic lists** | `list_hmi_textlists` | ✅ | ❌ | Unified: TextLists V21-Limit |
+| **User administration** | — | ❌ | ❌ | V21-Limit |
 
-> Die ❌-Bereiche sind Einschränkungen der TIA Portal Openness API V21 — nicht des MCP-Servers. Siemens öffnet diese APIs ggf. in späteren Versionen (V22+).
+> ❌-Bereiche sind Einschränkungen der TIA Portal Openness API V21, nicht des MCP-Servers.
 
 ---
 
@@ -278,19 +281,17 @@ Basierend auf der WinCC-Projektstruktur:
 | Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
 | Scripts exportieren | `export_hmi_scripts` | ✅ VBScript |
 | Scripts importieren | `import_hmi_scripts` | ✅ VBScript |
-| Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem-Attribute (IP, Display, Runtime …) |
+| Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem-Attribute |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ skalare Attribute |
-| Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, gruppiert |
-| Verbindungen auflisten | `list_hmi_connections` | ✅ nur nicht-integrierte |
-| Erfassungszyklen auflisten | `list_hmi_cycles` | ✅ Advanced — Name, Periode, system-Flag |
-| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
-| Textlisten auflisten | `list_hmi_textlists` | ✅ Advanced |
-| Alarme auflisten | `list_hmi_alarms` | ⚠️ V21: immer `[]` |
-| Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
-| Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
-| Tags anlegen / löschen | — | ❌ fehlt |
-| Connections lesen | — | ❌ fehlt |
+| Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel |
+| Verbindungen auflisten | `list_hmi_connections` | ⚠️ nur nicht-integrierte |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | ✅ Name, Periode, system-Flag |
+| Textlisten auflisten | `list_hmi_textlists` | ✅ |
+| Alarme auflisten | `list_hmi_alarms` | ❌ V21-Limit |
+| Datenlogs | `list_hmi_logs` | ❌ V21-Limit |
+| Geplante Tasks | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
 | Rezepte | — | ❌ V21-Limit |
+| Tags anlegen / löschen | — | ❌ fehlt |
 
 ### WinCC Unified (HmiSoftware)
 
@@ -303,19 +304,17 @@ Basierend auf der WinCC-Projektstruktur:
 | Tags exportieren | `export_hmi_tags`, `export_hmi_tagtable` | ✅ |
 | Tags importieren | `import_hmi_tags`, `import_hmi_tagtable` | ✅ |
 | Alarme auflisten | `list_hmi_alarms` | ✅ |
-| Alarme exportieren | `export_hmi_alarms` | ❌ V21-Limit |
-| Textlisten | `export/import_hmi_textlists` | ❌ V21-Limit |
 | Scripts exportieren | `export_hmi_scripts` | ✅ JS/YML |
 | Scripts importieren | `import_hmi_scripts` | ✅ |
 | Gerätekonfiguration lesen | `get_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration schreiben | `set_hmi_config` | ✅ DeviceItem + RuntimeSettings |
 | Gerätekonfiguration exportieren | `export_hmi_config` | ✅ Excel, 2 Sheets |
-| Verbindungen auflisten | `list_hmi_connections` | ✅ nur nicht-integrierte |
-| Datenlogs auslesen | `list_hmi_logs` | ✅ Unified |
-| Datenlog schreiben | `set_hmi_log` | ✅ Unified |
-| Erfassungszyklen auflisten | `list_hmi_cycles` | ❌ V21-Limit Unified |
-| Geplante Tasks auflisten | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
-| Textlisten auflisten | `list_hmi_textlists` | ❌ V21-Limit Unified |
+| Verbindungen auflisten | `list_hmi_connections` | ✅ |
+| Datenlogs auslesen | `list_hmi_logs` | ✅ Segment, Settings, Backup |
+| Datenlog schreiben | `set_hmi_log` | ✅ Name, Segmentgröße, Speicher |
+| Erfassungszyklen auflisten | `list_hmi_cycles` | ❌ V21-Limit |
+| Geplante Tasks | `list_hmi_scheduled_tasks` | ❌ V21-Limit |
+| Textlisten | `list_hmi_textlists` | ❌ V21-Limit |
 | Tags anlegen / löschen | — | ❌ fehlt |
 
 ### Bibliotheken

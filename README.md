@@ -1,7 +1,7 @@
 # TIA Portal MCP Server
 
 KI-Integration für Siemens TIA Portal V21 via Model Context Protocol (MCP).  
-Verbindet Claude Desktop, Copilot Studio und andere MCP-Clients mit TIA Portal über die Openness API.
+Verbindet Claude Code und andere MCP-Clients mit TIA Portal über die Openness API.
 
 ---
 
@@ -12,14 +12,14 @@ Verbindet Claude Desktop, Copilot Studio und andere MCP-Clients mit TIA Portal �
 | TIA Portal | V21 (getestet), V19/V20 teilweise kompatibel |
 | Python | 3.12+ |
 | Siemens.Engineering.dll | V21 PublicAPI (`C:\Program Files\Siemens\Automation\Portal V21\PublicAPI\V21\net48`) |
-| MCP Client | Claude Desktop, Copilot Studio, Open WebUI + Ollama |
+| MCP Client | Claude Code (Desktop App) |
 
 ---
 
 ## Installation
 
 ```
-C:\tia-mcp\
+C:\tia-mcp\mcp-server\
   server.py       ← MCP-Einstiegspunkt
   tia.py          ← Openness-Logik
   README.md
@@ -27,17 +27,28 @@ C:\tia-mcp\
     import\       ← Importpfad für write_import_file
 ```
 
-**Claude Desktop** — `%APPDATA%\Claude\claude_desktop_config.json`:
+**Claude Code** — Einstellungen → MCP Servers:
 ```json
 {
   "mcpServers": {
     "tia-portal": {
-      "command": "C:\\tia-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\tia-mcp\\server.py"]
+      "command": "C:\\tia-mcp\\mcp-server\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\tia-mcp\\mcp-server\\server.py"]
     }
   }
 }
 ```
+
+---
+
+## Architektur: Primär / Proxy
+
+Ab v1.4.0 können mehrere Claude-Sessions gleichzeitig auf denselben TIA Portal MCP Server zugreifen:
+
+- **Erste Instanz (primär):** Bindet Port 47823 als internen JSON-RPC-Server, hält die TIA Openness COM-Verbindung und führt alle Tool-Calls aus.
+- **Weitere Instanzen (proxy):** Erkennen automatisch dass eine primäre Instanz läuft, verbinden sich via TCP und leiten alle MCP-Aufrufe durch.
+
+COM-Zugriffe bleiben single-threaded und werden durch einen internen Lock serialisiert. Wird die primäre Instanz beendet, übernimmt beim nächsten Start automatisch die nächste Instanz die Rolle des Primärs.
 
 ---
 
@@ -99,6 +110,7 @@ attach_project / open_project
 | `get_version` | — | Server- und tia.py-Version + Changelog |
 | `get_project_info` | — | Projektname, Pfad, Geräteliste |
 | `list_devices` | — | Alle Geräte mit Typ (PLC / Advanced / Unified) |
+| `restart_server` | — | Primären MCP-Prozess sauber neu starten |
 
 ### PLC
 
@@ -213,9 +225,6 @@ Basierend auf der WinCC-Projektstruktur:
 | Kompilieren | `compile_plc` | ✅ |
 | Tag-Tabellen exportieren | `export_plc_tagtable` | ✅ |
 | Tag-Tabellen importieren | `import_plc_tagtable` | ✅ |
-| Bausteine auflisten | — | ❌ fehlt |
-| Tag-Tabellen auflisten | — | ❌ fehlt |
-| UDTs lesen / exportieren | — | ❌ fehlt |
 | DB-Inhalte lesen | — | ❌ fehlt |
 | Bausteine löschen | — | ❌ fehlt |
 
@@ -341,6 +350,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.4.0 | 2026-06-16 | Primär/Proxy-Architektur: mehrere Sessions teilen eine TIA-Verbindung; `restart_server`-Tool; BUG-15 Fix list_plc_tags comment-Feld |
 | 1.3.0 | 2026-06-15 | `list_plc_blocks`, `list_plc_tag_tables`, `list_plc_tags`, `list_plc_udts` — PLC vollständig lesbar |
 | 1.2.0 | 2026-06-14 | BUG-11–14 gefixt: rekursive Screen-Suche, Unified-Typ-Erkennung, HmiTarget-API-Support, import_hmi_screen mit XML-basiertem Delete-vor-Import |
 | 1.1.0 | 2026-06-14 | STA-Timeout + Auto-Restart, export_hmi_tags Unified-Workaround, VBScriptFolder-Support, import_hmi_scripts Advanced/Unified |

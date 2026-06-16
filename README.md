@@ -23,8 +23,16 @@ C:\tia-mcp\mcp-server\
   server.py       ← MCP-Einstiegspunkt
   tia.py          ← Openness-Logik
   README.md
+  TESTING.md
+  commit.bat      ← Git-Hilfsskript (add + commit + push in einem Schritt)
   export\         ← Exportpfad (wird automatisch angelegt)
     import\       ← Importpfad für write_import_file
+```
+
+**Commits** — `commit.bat` staged `tia.py`, `server.py`, `README.md` und `TESTING.md` automatisch:
+
+```bat
+commit.bat "v1.x.y: kurze Beschreibung der Änderung"
 ```
 
 **Claude Code** — Einstellungen → MCP Servers:

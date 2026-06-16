@@ -171,6 +171,21 @@ def main():
     tia._setup_logging()
     tia.sta.start()
 
+    # TIA Portal verbinden und Projekt übernehmen
+    print("Verbinde mit TIA Portal...")
+    r = tia.connect_portal(mode="attach")
+    if isinstance(r, dict) and r.get("status") == "error":
+        print(f"Fehler: {r.get('message')}")
+        sys.exit(1)
+    print(f"  Verbunden — TIA {r.get('tia_version','?')}  PID {r.get('process_id','?')}")
+
+    print("Übernehme offenes Projekt...")
+    r = tia.attach_project()
+    if isinstance(r, dict) and r.get("status") == "error":
+        print(f"Fehler: {r.get('message')}")
+        sys.exit(1)
+    print(f"  Projekt: {r.get('project','?')}\n")
+
     if args.list:
         result = tia.list_devices()
         devices = result.get("devices", []) if isinstance(result, dict) else []

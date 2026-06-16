@@ -2706,7 +2706,9 @@ def list_hmi_screen_management(device_name, screen_type=None):
                 items = []
                 for i in range(coll.Count):
                     item = coll[i]
-                    items.append({"name": str(item.Name)})
+                    label = (str(item.SlideinType) if stype == "slidein" and hasattr(item, "SlideinType")
+                             else str(item.Name) if hasattr(item, "Name") else f"item_{i}")
+                    items.append({"name": label})
                 result[stype] = {"count": coll.Count, "items": items}
         return {"device": device_name, "hmi_type": ht, "screen_management": result}
     return sta.run(_tia_call, _run)
@@ -2748,14 +2750,16 @@ def export_hmi_screen_management(device_name, screen_type, output_path=None):
                 if not hasattr(item, "Export"):
                     errors.append({"name": str(item.Name), "error": "kein Export"})
                     continue
-                xml_file = out_dir / f"hmi_{screen_type}_{device_name}_{item.Name}.xml"
+                label = (str(item.SlideinType) if screen_type == "slidein" and hasattr(item, "SlideinType")
+                         else str(item.Name) if hasattr(item, "Name") else f"item_{i}")
+                xml_file = out_dir / f"hmi_{screen_type}_{device_name}_{label}.xml"
                 if xml_file.exists():
                     xml_file.unlink()
                 try:
                     item.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-                    exported.append({"name": str(item.Name), "file": str(xml_file)})
+                    exported.append({"name": label, "file": str(xml_file)})
                 except Exception as ex:
-                    errors.append({"name": str(item.Name), "error": str(ex)})
+                    errors.append({"name": label, "error": str(ex)})
         if not exported and errors:
             raise TiaError("SCREEN_MGMT_EXPORT_FAILED", f"Export fehlgeschlagen: {errors}", False)
         return {"status": "ok", "device": device_name, "screen_type": screen_type,

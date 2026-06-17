@@ -55,7 +55,7 @@ def _fail(label, err):
         rec  = False
     # V21-Limits und "leer aber ok" als -- anzeigen
     if any(x in code for x in ("V21", "NOT_SUPPORTED", "LIMIT", "NO_SCRIPTS",
-                                "NO_TAG_TABLES", "NO_CYCLES")):
+                                "NO_TAG_TABLES", "NO_CYCLES", "GL_EMPTY", "EMPTY")):
         print(f"  --  {label}  [nicht verfuegbar: {msg}]")
     elif rec:
         print(f"  --  {label}  [{code}: {msg}]")
@@ -142,16 +142,24 @@ def export_all(name_arg: str, out_root: Path, devices: list):
     print("\n[ Tags ]")
     _call("HMI-Tags",               tia.export_hmi_tags,              item_name, str(out / "tags"))
 
-    # ── Verbindungen ──────────────────────────────────────────────────────────
+    # ── Verbindungen — JSON im Hauptthread schreiben (STA-Thread-Schreibschutz) ──
     print("\n[ Verbindungen ]")
-    _call("Connections",            tia.export_hmi_connections,       item_name, str(out / "hmi_connections.json"))
+    conn_result = _call("Connections lesen", tia.list_hmi_connections, item_name)
+    if conn_result:
+        p = out / "hmi_connections.json"
+        p.write_text(json.dumps(conn_result, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"       -> {p.name}  ({conn_result.get('count', '?')} Verbindungen)")
 
-    # ── Alarme ────────────────────────────────────────────────────────────────
+    # ── Alarme — JSON im Hauptthread schreiben ────────────────────────────────
     print("\n[ Alarme ]")
     if is_adv:
         _skip("Alarme",             "V21-Limit -- Advanced DiscreteAlarms nicht zugaenglich")
     else:
-        _call("Alarme (JSON)",      tia.export_hmi_alarms,            item_name, str(out / "hmi_alarms.json"))
+        alarm_result = _call("Alarme lesen", tia.list_hmi_alarms, item_name)
+        if alarm_result:
+            p = out / "hmi_alarms.json"
+            p.write_text(json.dumps(alarm_result, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"       -> {p.name}  ({alarm_result.get('count', '?')} Alarme)")
 
     # ── Textlisten & Grafiklisten ─────────────────────────────────────────────
     print("\n[ Text- und Grafiklisten ]")

@@ -1519,7 +1519,7 @@ def export_hmi_graphic_lists(device_name, output_path=None):
         if not exported and errors:
             raise TiaError("GL_EXPORT_FAILED", f"Kein Export möglich: {errors}", False)
         if not exported and not errors:
-            raise TiaError("GL_EMPTY", f"Keine Grafiklisten in '{device_name}' gefunden.", False)
+            raise TiaError("GL_EMPTY", f"Keine Grafiklisten in '{device_name}' gefunden.", True)
         return {"status": "ok", "device": device_name, "hmi_type": ht,
                 "exported": exported, "errors": errors, "count": len(exported)}
     return sta.run(_tia_call, _run)
@@ -3151,7 +3151,7 @@ def export_hmi_textlists(device_name, output_path=None):
                         errors.append({"name": tl.Name, "error": str(ex)})
         if not exported:
             raise TiaError("TEXTLIST_EXPORT_NOT_SUPPORTED",
-                f"Keine Textlisten exportierbar. errors={errors}", False)
+                f"Keine Textlisten exportierbar. errors={errors}", True)
         return {"status": "ok", "device": device_name, "hmi_type": ht,
                 "exported": exported, "count": len(exported)}
     return sta.run(_tia_call, _run)

@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.13.1"
+VERSION      = "1.13.2"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.13.2: STA-Loop — recoverable TiaErrors nur noch als DEBUG geloggt (kein ERROR-Traceback)",
         "1.13.1: _get_hmi — akzeptiert jetzt device.Name UND item.Name (z.B. HMI_Advanced = HMI_RT_1)",
         "1.13.0: export/import_hmi_alarms — JSON-basiert via GetAttributeInfos (kein V21-API-Export)",
         "1.12.0: set_hmi_log — Unified DataLog-Einstellungen schreiben (Name, Segment, Settings)",
@@ -182,7 +183,11 @@ class STAThread:
             try:
                 job.result_q.put(job.fn(*job.args, **job.kwargs))
             except Exception as e:
-                _log("sta").error(str(e), exc_info=True)
+                # Recoverable TiaErrors (leere Listen, nicht vorhandene Objekte) nur als DEBUG
+                if isinstance(e, TiaError) and e.recoverable:
+                    _log("sta").debug(str(e))
+                else:
+                    _log("sta").error(str(e), exc_info=True)
                 job.result_q.put(_Err(e))
         try:
             import pythoncom; pythoncom.CoUninitialize()

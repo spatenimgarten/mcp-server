@@ -6,7 +6,7 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.13.2"
+VERSION      = "1.13.4"
 VERSION_DATE = "2026-06-16"
 VERSION_INFO = {
     "version":      VERSION,
@@ -2764,7 +2764,7 @@ def export_hmi_screen_management(device_name, screen_type, output_path=None):
         coll, coll_attr = _get_screen_variant_coll(sw, screen_type)
         if coll is None:
             raise TiaError("SCREEN_MGMT_NOT_FOUND",
-                f"'{screen_type}' nicht verfügbar für '{device_name}'.", False)
+                f"'{screen_type}' nicht verfügbar für '{device_name}'.", True)
         exported = []
         errors = []
         # global_elements und overview: einzelne Objekte mit Export-Methode
@@ -2817,7 +2817,7 @@ def import_hmi_screen_management(device_name, screen_type, file_path):
         coll, _ = _get_screen_variant_coll(sw, screen_type)
         if coll is None:
             raise TiaError("SCREEN_MGMT_NOT_FOUND",
-                f"'{screen_type}' nicht verfügbar für '{device_name}'.", False)
+                f"'{screen_type}' nicht verfügbar für '{device_name}'.", True)
         if screen_type in ("global_elements", "overview"):
             # Einzelobjekt: Import via HmiTarget-Methode
             method = {"global_elements": "ImportScreenGlobalElements",

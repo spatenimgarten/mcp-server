@@ -213,7 +213,7 @@ def main():
                         help="Alle Geraete mit Item-Namen anzeigen")
     args = parser.parse_args()
 
-    tia._setup_logging()
+    tia._setup_logging(level="WARNING")
     tia.sta.start()
 
     # TIA Portal verbinden

@@ -6,13 +6,15 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.13.4"
-VERSION_DATE = "2026-06-16"
+VERSION      = "1.14.0"
+VERSION_DATE = "2026-09-26"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.14.0: get_online_state / go_online / go_offline — SPS online/offline via OnlineProvider, "
+        "OnlineLegitimation-Handler (Anmeldung anonym/Benutzer, Passwort, TLS-Zertifikat)",
         "1.13.2: STA-Loop — recoverable TiaErrors nur noch als DEBUG geloggt (kein ERROR-Traceback)",
         "1.13.1: _get_hmi — akzeptiert jetzt device.Name UND item.Name (z.B. HMI_Advanced = HMI_RT_1)",
         "1.13.0: export/import_hmi_alarms — JSON-basiert via GetAttributeInfos (kein V21-API-Export)",
@@ -3506,3 +3508,181 @@ def compile_plc(device_name):
             "messages": messages[:20]
         }
     return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ONLINE / OFFLINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _online_provider(device_name):
+    """OnlineProvider-Service der CPU. Typ liegt in V21 in Siemens.Engineering.Base."""
+    item = _find_plc_item(device_name)
+    op_type = _sess.project.GetType().Assembly.GetType("Siemens.Engineering.Online.OnlineProvider")
+    if not op_type:
+        raise TiaError("ONLINE_NOT_SUPPORTED",
+            "OnlineProvider nicht gefunden — Siemens.Engineering.Base.dll pruefen.", False)
+    op = item.GetService[op_type]()
+    if not op:
+        raise TiaError("ONLINE_NOT_SUPPORTED",
+            f"Kein OnlineProvider fuer '{device_name}' verfuegbar.", False)
+    return op
+
+def _online_options(cfg):
+    """Verfuegbare Modi / PG-PC-Schnittstellen / Zielschnittstellen auflisten."""
+    modes = []
+    for m in cfg.Modes:
+        pcs = []
+        for pc in m.PcInterfaces:
+            pcs.append({"name": str(pc.Name), "number": int(pc.Number),
+                        "targets": [str(ti.Name) for ti in pc.TargetInterfaces]})
+        modes.append({"mode": str(m.Name), "pc_interfaces": pcs})
+    return modes
+
+def get_online_state(device_name):
+    def _run():
+        _sess.ensure_project()
+        op = _online_provider(device_name)
+        cfg = op.Configuration
+        return {"status": "ok", "device": device_name,
+                "state": str(op.State),
+                "is_configured": bool(cfg.IsConfigured),
+                "options": _online_options(cfg)}
+    return sta.run(_tia_call, _run)
+
+def _secure(text):
+    import System.Security
+    s = System.Security.SecureString()
+    for ch in text:
+        s.AppendChar(ch)
+    s.MakeReadOnly()
+    return s
+
+def _legitimation_handler(requests, user=None, password=None, trust_certificate=False):
+    """Handler fuer ConnectionConfiguration.OnlineLegitimation (V21).
+    TIA fragt darueber Anmeldung, Passwort und TLS-Zertifikat ab. Ohne Handler
+    bricht GoOnline() mit EngineeringTargetInvocationException ab."""
+    def _h(c):
+        kind = c.GetType().Name
+        entry = {"type": kind}
+        try:
+            if kind == "OnlineAuthenticationConfiguration":
+                supported = {str(a.CurrentUserType): a.CurrentUserType
+                             for a in c.GetSupportedAuthenticationTypes()}
+                entry["supported"] = list(supported)
+                cred = c.OnlineCredentials
+                if user and password:
+                    utype = next((supported[k] for k in ("ProjectUser", "GlobalUser", "PasswordOnly")
+                                  if k in supported), None)
+                    if utype is None:
+                        entry["handled"] = False
+                        entry["hint"] = "Keine Benutzeranmeldung unterstuetzt."
+                    else:
+                        cred.Type = utype
+                        cred.Name = user
+                        cred.SetPassword(_secure(password))
+                        entry["handled"] = f"{utype} ({user})"
+                elif password and "PasswordOnly" in supported:
+                    cred.Type = supported["PasswordOnly"]
+                    cred.SetPassword(_secure(password))
+                    entry["handled"] = "PasswordOnly"
+                elif "AnonymousUser" in supported:
+                    cred.Type = supported["AnonymousUser"]
+                    entry["handled"] = "AnonymousUser"
+                else:
+                    entry["handled"] = False
+                    entry["hint"] = "Anmeldung erforderlich — user und password angeben."
+            elif kind in ("OnlinePasswordConfiguration", "OnlineReadAccessPassword"):
+                if password:
+                    c.SetPassword(_secure(password))
+                    entry["handled"] = "password"
+                else:
+                    entry["handled"] = False
+                    entry["hint"] = "Passwort erforderlich — password angeben."
+            elif kind == "TlsVerificationConfiguration":
+                entry["plc_name"] = str(c.PlcName)
+                entry["verification_info"] = str(c.VerificationInfo)
+                if trust_certificate:
+                    sel_type = c.CurrentSelection.GetType()
+                    import System
+                    c.CurrentSelection = System.Enum.Parse(sel_type, "Trusted")
+                    entry["handled"] = "Trusted"
+                else:
+                    entry["handled"] = False
+                    entry["hint"] = "SPS-Zertifikat pruefen, dann trust_certificate=true setzen."
+            else:
+                entry["handled"] = False
+        except Exception as e:
+            entry["handled"] = False
+            entry["error"] = str(e)
+        requests.append(entry)
+    return _h
+
+def go_online(device_name, mode=None, pc_interface=None, pc_interface_number=None,
+              target_interface=None, user=None, password=None, trust_certificate=False):
+    """Online gehen. Ohne Parameter wird die im Projekt gespeicherte Verbindung genutzt."""
+    def _run():
+        _sess.ensure_project()
+        op = _online_provider(device_name)
+        cfg = op.Configuration
+
+        if mode or pc_interface or target_interface:
+            m = next((x for x in cfg.Modes if not mode or str(x.Name) == mode), None)
+            if not m:
+                raise TiaError("ONLINE_MODE_NOT_FOUND", f"Modus '{mode}' nicht gefunden.", True,
+                               {"options": _online_options(cfg)})
+            pc = next((x for x in m.PcInterfaces
+                       if (not pc_interface or str(x.Name) == pc_interface)
+                       and (pc_interface_number is None or int(x.Number) == int(pc_interface_number))), None)
+            if not pc:
+                raise TiaError("ONLINE_PC_INTERFACE_NOT_FOUND",
+                               f"PG/PC-Schnittstelle '{pc_interface}' nicht gefunden.", True,
+                               {"options": _online_options(cfg)})
+            ti = next((x for x in pc.TargetInterfaces
+                       if not target_interface or str(x.Name) == target_interface), None)
+            if not ti:
+                raise TiaError("ONLINE_TARGET_NOT_FOUND",
+                               f"Zielschnittstelle '{target_interface}' nicht gefunden.", True,
+                               {"options": _online_options(cfg)})
+            cfg.ApplyConfiguration(ti)
+        elif not cfg.IsConfigured:
+            raise TiaError("ONLINE_NOT_CONFIGURED",
+                "Keine Online-Verbindung konfiguriert. mode, pc_interface und target_interface angeben.",
+                True, {"options": _online_options(cfg)})
+
+        before = str(op.State)
+        requests = []
+        handler = _legitimation_handler(requests, user, password, trust_certificate)
+        cfg.OnlineLegitimation += handler
+        try:
+            op.GoOnline()
+        except Exception as e:
+            open_req = [r for r in requests if not r.get("handled")]
+            raise TiaError("ONLINE_FAILED",
+                f"GoOnline fehlgeschlagen: {str(e).splitlines()[0]}", True,
+                {"state": str(op.State), "legitimation": requests,
+                 "hint": open_req[0].get("hint") if open_req else None})
+        finally:
+            cfg.OnlineLegitimation -= handler
+        state = str(op.State)
+        _log("online").info(f"go_online {device_name}: {before} → {state} {requests}")
+        result = {"status": "ok" if state == "Online" else "error",
+                  "device": device_name, "state_before": before, "state": state,
+                  "legitimation": requests}
+        if state == "Protected":
+            result["hint"] = "SPS ist zugriffsgeschuetzt — Legitimation im TIA Portal durchfuehren."
+        elif state == "NotReachable":
+            result["hint"] = "SPS nicht erreichbar — Schnittstelle/IP pruefen (get_online_state)."
+        return result
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
+
+def go_offline(device_name):
+    def _run():
+        _sess.ensure_project()
+        op = _online_provider(device_name)
+        before = str(op.State)
+        if before != "Offline":
+            op.GoOffline()
+        state = str(op.State)
+        _log("online").info(f"go_offline {device_name}: {before} → {state}")
+        return {"status": "ok" if state == "Offline" else "error",
+                "device": device_name, "state_before": before, "state": state}
+    return sta.run(_tia_call, _run)

@@ -1,4 +1,4 @@
-"""
+r"""
 server.py — TIA Portal MCP Server
 Einstiegspunkt. Startet mit: python server.py
 Claude Desktop: %APPDATA%\Claude\claude_desktop_config.json
@@ -17,8 +17,8 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.12.0"
-VERSION_DATE = "2026-06-16"
+VERSION      = "1.14.0"
+VERSION_DATE = "2026-09-26"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
 # Erste Instanz wird "primär": bindet Port 47823 als JSON-RPC TCP-Server und
@@ -166,6 +166,9 @@ und Standardstrukturen anlegen (PLC, HMI Advanced/Unified, Bibliotheken).
 
 ## PLC Export / Import
   compile_plc(device)                          → SPS kompilieren
+  get_online_state(device)                     → Online-Status + verfuegbare Schnittstellen
+  go_online(device, mode?, pc_interface?, target_interface?) → Online gehen
+  go_offline(device)                           → Offline gehen
   export_plc_block(device, block, path?)       → Baustein als XML exportieren
   import_plc_block(device, file_path)          → Baustein aus XML importieren
   get_plc_block_source(device, block, path?)   → Quellcode lesen (SCL: Text, LAD/FBD: XML)
@@ -678,6 +681,30 @@ async def list_tools():
           "Bei Fehler 'Block is inconsistent' zuerst compile_plc aufrufen.",
           {"device_name":{"type":"string"}}, ["device_name"]),
 
+        # PLC ONLINE / OFFLINE
+        T("get_online_state",
+          "Online-Status der SPS (Offline, Online, NotReachable, Protected, ...) "
+          "und verfuegbare Modi / PG-PC-Schnittstellen / Zielschnittstellen.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+        T("go_online",
+          "SPS online gehen. Ohne weitere Parameter wird die im Projekt gespeicherte "
+          "Verbindung genutzt. Sonst mode (z.B. 'PN/IE'), pc_interface, pc_interface_number "
+          "und target_interface (z.B. '1 X1') aus get_online_state angeben. "
+          "Anmeldung: ohne user/password anonym (falls die SPS das erlaubt). "
+          "TLS-Zertifikat wird nur mit trust_certificate=true vertraut.",
+          {"device_name":{"type":"string"},
+           "mode":{"type":"string"},
+           "pc_interface":{"type":"string"},
+           "pc_interface_number":{"type":"integer"},
+           "target_interface":{"type":"string"},
+           "user":{"type":"string"},
+           "password":{"type":"string"},
+           "trust_certificate":{"type":"boolean","default":False}},
+          ["device_name"]),
+        T("go_offline",
+          "SPS offline gehen. Ist die SPS bereits offline, passiert nichts.",
+          {"device_name":{"type":"string"}}, ["device_name"]),
+
         # PLC LESEN
         T("list_plc_blocks",
           "Alle PLC-Bausteine auflisten (OB, FC, FB, DB) inkl. Untergruppen. "
@@ -909,6 +936,12 @@ def _dispatch(name, a):
         case "execute_openness":           return tia.execute_openness(a["code"],a.get("mode","read"))
         case "get_standard_template":      return {"template": _STANDARD_TEMPLATE}
         case "compile_plc":                return tia.compile_plc(a["device_name"])
+        case "get_online_state":           return tia.get_online_state(a["device_name"])
+        case "go_online":                  return tia.go_online(a["device_name"], a.get("mode"),
+                                                                a.get("pc_interface"), a.get("pc_interface_number"),
+                                                                a.get("target_interface"), a.get("user"),
+                                                                a.get("password"), a.get("trust_certificate", False))
+        case "go_offline":                 return tia.go_offline(a["device_name"])
         case "list_plc_blocks":            return tia.list_plc_blocks(a["device_name"], a.get("group"))
         case "list_plc_tag_tables":        return tia.list_plc_tag_tables(a["device_name"])
         case "list_plc_tags":              return tia.list_plc_tags(a["device_name"], a["table_name"])

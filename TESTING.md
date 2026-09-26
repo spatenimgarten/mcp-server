@@ -1,7 +1,7 @@
 # TIA Portal MCP Server — Validierungs-Checkliste
 
 `server.py · tia.py  —  TIA Portal V21 Openness`  
-54 registrierte MCP-Tools.
+78 registrierte MCP-Tools.
 
 **Zweck:** Vor jedem Release / Commit prüfen ob alle MCP-Tools korrekt reagieren.  
 **Testprojekt Advanced:** `F:\02_Projekte\AI\Projekt2\Projekt2.ap21` · PLC: `PLC_1` · HMI: `HMI_Station_1`, `HMI_Station_2`  
@@ -61,6 +61,22 @@
 | 3.7 | `compile_plc` | `device_name="PLC_1"` | ✅ | `errors:0, warnings:0` |
 | 3.8 | `get_plc_block_source` | `device_name="PLC_1", block_name="Main"` | ✅ | `type:OB, language:LAD, xml_size_kb:3.9` |
 | 3.9 | `get_plc_block_source` | `device_name="PLC_1", block_name="FC_MCP_Test"` | ✅ | `type:FC, language:SCL, scl_source:";"` |
+
+---
+
+## 3b — PLC: Online / Offline — v1.14.0
+
+> Testprojekt: `Test-Rack-03_V21` · PLC: `PLC_1` (S7-1500, PLCSIM / PN/IE `1 X1`, sichere PG/PC-Kommunikation, nur `AnonymousUser`).
+> Getestet über die RPC-Schnittstelle des Primär-Servers (Port 47823).
+
+| # | Tool | Parameter | Status | Notiz |
+|---|---|---|:---:|---|
+| 3b.1 | `get_online_state` | `device_name="PLC_1"` | ✅ | `state:Online, is_configured:true`, options: Modus `PN/IE`, 3 PG/PC-Schnittstellen, Ziel `1 X1` |
+| 3b.2 | `go_offline` | `device_name="PLC_1"` | ✅ | `state_before:Online, state:Offline` |
+| 3b.3 | `go_online` | `device_name="PLC_1"` | ✅ | `state_before:Offline, state:Online`, legitimation: `OnlineAuthenticationConfiguration → AnonymousUser` |
+| 3b.4 | `get_online_state` | `device_name="PLC_1"` | ✅ | `state:Online` |
+| 3b.5 | `go_online` | `user`, `password` | 🔄 | Benötigt SPS mit Benutzerverwaltung |
+| 3b.6 | `go_online` | `trust_certificate=true` | 🔄 | Benötigt SPS mit noch nicht vertrautem TLS-Zertifikat |
 
 ---
 
@@ -331,6 +347,7 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | BUG-8 | 🟡 MITTEL | Export überschreibt nicht | ✅ | TIA wirft Exception wenn Zieldatei existiert | Alle Export-Funktionen löschen Zieldatei vor Export |
 | BUG-9 | 🟢 NIEDRIG | `compile_plc` ICompilable nicht gefunden | ✅ | `ICompilable` liegt in `Siemens.Engineering.Base`, nicht in Step7-Assembly | Dreistufige Suche: Step7 → Base per Reflection → Namespace-Import |
 | BUG-10 | 🟢 NIEDRIG | `export_hmi_tags` ignoriert `output_path` | ✅ | `output_path` wurde als Dateiname interpretiert, aber Zielordner-Variable wurde ignoriert | `output_path` ist jetzt korrekt Zielordner |
+| BUG-16 | 🟠 HOCH | `go_online` → `EngineeringTargetInvocationException` ohne Details | ✅ | SPS mit sicherer PG/PC-Kommunikation fragt Anmeldung über `ConnectionConfiguration.OnlineLegitimation` ab — ohne Handler bricht `GoOnline()` ab | Handler registriert vor `GoOnline()`: anonym / Benutzer / Passwort / TLS-Zertifikat |
 
 ---
 
@@ -346,6 +363,7 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | `CreateFB()` nur ProDiag | `execute_openness` | XML-Import via `import_plc_block` |
 | `project.Save()` in `execute_openness` | — | `save_project`-Tool verwenden |
 | `open_portal` Timeout | `open_portal` | TIA manuell starten, dann `connect_portal` |
+| Baustein-Export/Import im Online-Modus | `export_plc_block`, `import_plc_block`, `set_plc_block_source` | Vorher `go_offline` |
 | Unified Screens in binären DB-Dateien | `export_hmi_screen` Unified | Kein Workaround in V21 |
 
 ---
@@ -364,5 +382,6 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | V1.4 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.8.0: `get/set/export_hmi_config` mit Advanced/Unified-Weiche. Abschnitt 7b um neue Tools erweitert. Tool-Zähler auf 47. |
 | V1.5 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.9.0: `list_hmi_cycles`, `list_hmi_scheduled_tasks`. Abschnitt 6b angelegt. Tool-Zähler auf 49. |
 | V1.6 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.10–1.12: `list_hmi_connections`, `list_hmi_textlists`-Fix, `list_hmi_logs`, `set_hmi_log`. Abschnitte 6c–6e. Tool-Zähler auf 54. |
+| V1.7 | 2026-09-26 | Claude Opus 5.5 | tia.py / server.py v1.14.0: `get_online_state`, `go_online`, `go_offline`. Abschnitt 3b angelegt, BUG-16 (OnlineLegitimation) gefixt. Tool-Zähler auf 78. |
 
 | V0.6 | 2026-06-13 | Claude Sonnet 4.6 | Advanced/Unified-Weiche für alle HMI-Tools. Neue Hilfsfunktionen: `_hmi_screens()`, `_hmi_screens_import()`, `_hmi_screen_folders()`, `_hmi_tag_folders()`. Neues Tool: `create_hmi_structure`. Testabschnitte 6+7 um Unified-Spalte erweitert. README: API-Unterschiede-Tabelle ergänzt. |

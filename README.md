@@ -125,6 +125,9 @@ attach_project / open_project
 | Tool | Parameter | Beschreibung |
 |---|---|---|
 | `compile_plc` | `device_name` | PLC kompilieren |
+| `get_online_state` | `device_name` | Online-Status (`Offline`, `Online`, `NotReachable`, `Protected` …) + verfügbare Modi / PG-PC- / Zielschnittstellen |
+| `go_online` | `device_name`, [`mode`, `pc_interface`, `pc_interface_number`, `target_interface`, `user`, `password`, `trust_certificate`] | Online gehen² |
+| `go_offline` | `device_name` | Offline gehen (no-op wenn bereits offline) |
 | `list_plc_blocks` | `device_name`, [`group`] | Alle Bausteine auflisten (inkl. Untergruppen, opt. Gruppenfilter) |
 | `list_plc_tag_tables` | `device_name` | Alle Tag-Tabellen auflisten |
 | `list_plc_tags` | `device_name`, `table_name` | Tags einer Tabelle auflisten |
@@ -140,6 +143,10 @@ attach_project / open_project
 | `export_plc_config` | `device_name`, [`output_path`] | CPU-Konfiguration als Excel exportieren, gruppiert nach Kategorien |
 
 ¹ Nur einfache SCL-Anweisungen ohne Keywords/Kommentare. Für komplexen SCL: Export → XML bearbeiten → Import.
+
+² Ohne Verbindungsparameter wird die im Projekt gespeicherte Verbindung genutzt. Die Anmeldung läuft über den V21-Event `ConnectionConfiguration.OnlineLegitimation`:
+ohne `user`/`password` anonym (falls die SPS `AnonymousUser` erlaubt), sonst Benutzer/Passwort. Einem TLS-Zertifikat der SPS wird nur mit `trust_certificate=true` vertraut.
+Die Rückgabe `legitimation` zeigt, welche Abfragen TIA gestellt hat und wie sie beantwortet wurden.
 
 ### HMI: Lesen
 
@@ -272,6 +279,7 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 | Bausteine importieren | `import_plc_block` | ✅ |
 | SCL schreiben | `set_plc_block_source` | ⚠️ nur einfache Anweisungen |
 | Kompilieren | `compile_plc` | ✅ |
+| Online / Offline gehen | `go_online`, `go_offline`, `get_online_state` | ✅ inkl. Anmeldung / TLS-Zertifikat |
 | Tag-Tabellen exportieren | `export_plc_tagtable` | ✅ |
 | Tag-Tabellen importieren | `import_plc_tagtable` | ✅ |
 | CPU-Konfiguration lesen | `get_plc_config` | ✅ alle DeviceItem-Attribute |
@@ -411,6 +419,8 @@ Tools die noch nicht implementiert sind, nach Priorität:
 - **`CreateFB()` in `execute_openness`** — nur ProDiag. Neue Bausteine per XML-Import anlegen.
 - **STA-Thread-Timeout:** Hängende API-Aufrufe werden nach 60 Sekunden abgebrochen. Der Server bleibt verfügbar, Session-Handles werden zurückgesetzt → `connect_portal` + `attach_project` erneut aufrufen.
 - **Unified Screen-Export** — Screens sind in binären DB-Dateien eingebettet, kein Zugriff über Openness möglich.
+- **Online-Modus** — Export/Import von Bausteinen (auch `set_plc_block_source`) schlägt fehl mit *"This function is not supported in online mode"*. Vorher `go_offline` aufrufen.
+- **`GoOnline()` ohne Legitimation-Handler** — wirft eine `EngineeringTargetInvocationException` ohne Details, sobald die SPS eine Anmeldung verlangt. `go_online` registriert den Handler automatisch.
 
 ---
 
@@ -438,6 +448,8 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.14.0 | 2026-09-26 | `get_online_state`, `go_online`, `go_offline` — SPS online/offline via `OnlineProvider` inkl. `OnlineLegitimation`-Handler (anonym / Benutzer / Passwort / TLS-Zertifikat). `server.py` und `tia.py` wieder auf gleicher Version. `SyntaxWarning` im `server.py`-Docstring behoben. |
+| 1.13.1–1.13.4 | 2026-06-17 | STA-Loop / recoverable TiaErrors nur noch DEBUG-Log; `_get_hmi` akzeptiert device.Name und item.Name |
 | 1.13.0 | 2026-06-16 | `export/import_hmi_alarms` — JSON-basiert via GetAttributeInfos (kein V21-API-Export); `list_hmi_alarms` erweitert (alle Attribute) |
 | 1.12.x | 2026-06-16 | `export/import_hmi_connections` JSON; `export/import_hmi_cycles` XML; `list/export/import_hmi_graphic_lists`; `list/export/import_hmi_screen_management` (template/slidein/popup/global/overview) |
 | 1.12.0 | 2026-06-16 | `set_hmi_log` — Unified DataLog-Einstellungen schreiben (Name, Segment, Storage) |

@@ -60,7 +60,7 @@
 | 3.6 | `list_plc_udts` | `device_name="PLC_1"` | 🔄 | Erwartet: `count:1`, udts: `[{name:udt_Test, type:PlcStruct}]` |
 | 3.7 | `compile_plc` | `device_name="PLC_1"` | ✅ | `errors:0, warnings:0` |
 | 3.8 | `get_plc_block_source` | `device_name="PLC_1", block_name="Main"` | ✅ | `type:OB, language:LAD, xml_size_kb:3.9` |
-| 3.9 | `get_plc_block_source` | `device_name="PLC_1", block_name="FC_MCP_Test"` | ✅ | `type:FC, language:SCL, scl_source:";"` |
+| 3.9 | `get_plc_block_source` | `device_name="PLC_1", block_name="FC_MCP_Test"` | ✅ | `type:FC, language:SCL` — ab v1.14.1 vollständige Quelle via `GenerateSource` (vorher zusammengesetzte Tokens ohne Bezeichner) |
 
 ---
 
@@ -101,7 +101,11 @@
 |---|---|---|:---:|---|
 | 5.1 | `import_plc_block` | `device_name="PLC_1", file_path="C:\tia-mcp\export\FC_MCP_Test.xml"` | ✅ | `blocks:[Siemens.Engineering.SW.Blocks.FC]` — Roundtrip 4.2→5.1 ✅ |
 | 5.2 | `import_plc_tagtable` | `device_name="PLC_1", file_path="C:\tia-mcp\export\plc_tags_MCP_TestTags.xml"` | ✅ | Roundtrip 4.3→5.2 ✅ |
-| 5.3 | `set_plc_block_source` | `device_name="PLC_1", block_name="Block_2", scl_source=";"` | ✅ | Import + Roundtrip erfolgreich. **V21-Einschränkung:** Nur einfache Anweisungen ohne Keywords/Kommentare. Für komplexen SCL: `export_plc_block` → XML bearbeiten → `import_plc_block`. |
+| 5.3 | `set_plc_block_source` | `scl_source` = vollständiger FB (neu) | ✅ | v1.14.1, `Test-Rack-03_V21`, `FB_MCP_SrcTest`: `mode:full`, Baustein angelegt |
+| 5.3a | `set_plc_block_source` | `scl_source` = nur Rumpf (REGION/IF/ELSE) | ✅ | `mode:body`, Schnittstelle bleibt, `compile.errors:0` |
+| 5.3b | `set_plc_block_source` | Rumpf mit Syntaxfehler | ✅ | `status:error`, `Tag #GibtEsNicht not defined.`, `Expression expected.` mit Pfad/Zeile |
+| 5.3c | `set_plc_block_source` | SPS online | ✅ | `PLC_ONLINE, recoverable:true` |
+| 5.3d | `get_plc_block_source` → `set_plc_block_source` | Roundtrip | ✅ | Vollständige Quelle gelesen und unverändert zurückgeschrieben, 0 Fehler |
 
 ---
 
@@ -348,6 +352,7 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | BUG-9 | 🟢 NIEDRIG | `compile_plc` ICompilable nicht gefunden | ✅ | `ICompilable` liegt in `Siemens.Engineering.Base`, nicht in Step7-Assembly | Dreistufige Suche: Step7 → Base per Reflection → Namespace-Import |
 | BUG-10 | 🟢 NIEDRIG | `export_hmi_tags` ignoriert `output_path` | ✅ | `output_path` wurde als Dateiname interpretiert, aber Zielordner-Variable wurde ignoriert | `output_path` ist jetzt korrekt Zielordner |
 | BUG-16 | 🟠 HOCH | `go_online` → `EngineeringTargetInvocationException` ohne Details | ✅ | SPS mit sicherer PG/PC-Kommunikation fragt Anmeldung über `ConnectionConfiguration.OnlineLegitimation` ab — ohne Handler bricht `GoOnline()` ab | Handler registriert vor `GoOnline()`: anonym / Benutzer / Passwort / TLS-Zertifikat |
+| BUG-17 | 🔴 KRITISCH | `set_plc_block_source` → *"The token is not supported at the object with UID …"* | ✅ | SCL-Zeilen wurden als ganze `<Token Text="…">` ins V21-XML geschrieben; V21 erwartet einzelne Tokens, Bezeichner als `<Access>`, Leerraum als `<Blank>`/`<NewLine>`. Fehlerzeile war immer der erste Token (fix, unabhängig vom Input) | Import über externe Quelle (`GenerateSource` / `GenerateBlocksFromSource`); `get_plc_block_source` analog |
 
 ---
 
@@ -383,5 +388,6 @@ Alle 10 identifizierten Bugs wurden gefixt.
 | V1.5 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.9.0: `list_hmi_cycles`, `list_hmi_scheduled_tasks`. Abschnitt 6b angelegt. Tool-Zähler auf 49. |
 | V1.6 | 2026-06-16 | Claude Sonnet 4.6 | tia.py v1.10–1.12: `list_hmi_connections`, `list_hmi_textlists`-Fix, `list_hmi_logs`, `set_hmi_log`. Abschnitte 6c–6e. Tool-Zähler auf 54. |
 | V1.7 | 2026-09-26 | Claude Opus 5.5 | tia.py / server.py v1.14.0: `get_online_state`, `go_online`, `go_offline`. Abschnitt 3b angelegt, BUG-16 (OnlineLegitimation) gefixt. Tool-Zähler auf 78. |
+| V1.8 | 2026-09-26 | Claude Opus 5.5 | v1.14.1: BUG-17 (`set_plc_block_source` Token-XML) gefixt, Tests 5.3–5.3d. |
 
 | V0.6 | 2026-06-13 | Claude Sonnet 4.6 | Advanced/Unified-Weiche für alle HMI-Tools. Neue Hilfsfunktionen: `_hmi_screens()`, `_hmi_screens_import()`, `_hmi_screen_folders()`, `_hmi_tag_folders()`. Neues Tool: `create_hmi_structure`. Testabschnitte 6+7 um Unified-Spalte erweitert. README: API-Unterschiede-Tabelle ergänzt. |

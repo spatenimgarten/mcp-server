@@ -6,13 +6,17 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.14.0"
+VERSION      = "1.14.1"
 VERSION_DATE = "2026-09-26"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.14.1: set_plc_block_source — ueber externe Quelle (GenerateSource / GenerateBlocksFromSource) "
+        "statt Token-XML; ganzer Baustein oder nur Rumpf; Offline-Pruefung; Baustein wird danach "
+        "uebersetzt (Fehler mit Zeile). get_plc_block_source liefert SCL via GenerateSource "
+        "(vorher unbrauchbar zusammengesetzte Tokens). compile_plc liefert Fehlertexte.",
         "1.14.0: get_online_state / go_online / go_offline — SPS online/offline via OnlineProvider, "
         "OnlineLegitimation-Handler (Anmeldung anonym/Benutzer, Passwort, TLS-Zertifikat)",
         "1.13.2: STA-Loop — recoverable TiaErrors nur noch als DEBUG geloggt (kein ERROR-Traceback)",
@@ -38,7 +42,7 @@ VERSION_INFO = {
     ]
 }
 
-import os, sys, threading, queue, logging, textwrap
+import os, sys, threading, queue, logging, textwrap, re
 from pathlib import Path
 from typing import Any, Callable
 from logging.handlers import RotatingFileHandler
@@ -2528,13 +2532,30 @@ def get_plc_block_source(device_name, block_name, output_path=None):
         lang_str    = str(language) if language else "Unknown"
 
         # SCL-Quellcode extrahieren
+        # V21-Token-XML laesst sich nicht verlustfrei zusammensetzen (Bezeichner und
+        # Leerraum stehen in eigenen Elementen) — daher TIA die Quelle generieren lassen.
+        # Ergebnis ist der vollstaendige Baustein inkl. Schnittstelle, direkt wieder
+        # mit set_plc_block_source importierbar.
         scl_source  = None
         scl_file    = None
         if "SCL" in lang_str.upper() or "StructuredControlLanguage" in lang_str:
-            scl_source = _extract_scl(xml_content)
-            if scl_source:
-                scl_file = out_dir / f"{block_name}.scl"
-                scl_file.write_text(scl_source, encoding="utf-8")
+            scl_file = out_dir / f"{block_name}.scl"
+            if scl_file.exists(): scl_file.unlink()
+            try:
+                from Siemens.Engineering.SW.ExternalSources import IGenerateSource, GenerateOptions
+                from System.Collections.Generic import List
+                items = List[IGenerateSource]()
+                items.Add(block)
+                plc.ExternalSourceGroup.GenerateSource(items, FileInfo(str(scl_file)),
+                                                       getattr(GenerateOptions, "None"))
+                scl_source = scl_file.read_text(encoding="utf-8-sig")
+            except Exception as e:
+                _log("plc").warning(f"GenerateSource {block_name} fehlgeschlagen: {e}")
+                scl_source = _extract_scl(xml_content)
+                if scl_source:
+                    scl_file.write_text(scl_source, encoding="utf-8")
+                else:
+                    scl_file = None
 
         return {
             "status":    "ok",
@@ -3296,119 +3317,118 @@ def create_hmi_structure(device_name, structure):
         }
     return sta.run(_tia_call, _run)
 
+_SCL_HEADER_RE = re.compile(
+    r'^\s*(FUNCTION_BLOCK|FUNCTION|ORGANIZATION_BLOCK)\s+"?([^"\s:]+)"?', re.M)
+_SCL_BEGIN_RE  = re.compile(r'^[ \t]*BEGIN[ \t]*\r?$', re.M)
+_SCL_END_RE    = re.compile(r'^[ \t]*END_(FUNCTION_BLOCK|FUNCTION|ORGANIZATION_BLOCK)[ \t]*\r?$', re.M)
+
 def set_plc_block_source(device_name, block_name, scl_source):
     """
-    SCL-Quellcode direkt als String in einen Baustein schreiben und importieren.
-    Gegenstück zu get_plc_block_source.
-    scl_source: SCL-Code als String — wird als temporäre XML-Datei verpackt und importiert.
-    Voraussetzung: Baustein muss bereits existieren (gleicher Name, gleicher Typ).
+    SCL-Quellcode schreiben — ueber eine externe Quelle (PlcExternalSource).
+    scl_source kann sein:
+      - vollstaendiger Baustein (FUNCTION_BLOCK "Name" ... END_FUNCTION_BLOCK):
+        Schnittstelle + Rumpf werden ersetzt, Baustein wird bei Bedarf neu angelegt.
+      - nur Rumpf (Anweisungen): Schnittstelle bleibt, Quelle des bestehenden
+        Bausteins wird generiert und der Teil zwischen BEGIN und END_... ersetzt.
+    TIA uebersetzt die Quelle selbst (GenerateBlocksFromSource) — kein eigenes
+    Token-XML mehr (das scheiterte mit 'The token is not supported').
     """
     def _run():
         _sess.ensure_project()
         import Siemens.Engineering as eng
+        from Siemens.Engineering.SW.ExternalSources import (
+            IGenerateSource, GenerateOptions, GenerateBlockOption)
+        from System.Collections.Generic import List
         from System.IO import FileInfo
+
         plc = _find_sw(_sess.project, device_name, "PlcSoftware", eng)
         if not plc:
             raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
+
+        try:
+            state = str(_online_provider(device_name).State)
+        except TiaError:
+            state = "Offline"
+        if state != "Offline":
+            raise TiaError("PLC_ONLINE",
+                f"PLC '{device_name}' ist {state} — Quellen-Import nur offline moeglich. "
+                "Vorher go_offline aufrufen.", True, {"state": state})
+
         block = _find_block(plc, block_name)
-        if not block:
-            avail = [b.Name for b in plc.BlockGroup.Blocks]
-            raise TiaError("BLOCK_NOT_FOUND", f"Baustein '{block_name}' nicht gefunden.", True,
-                           {"available": avail})
-        lang = str(getattr(block, "ProgrammingLanguage", ""))
-        if "SCL" not in lang.upper() and "StructuredControlLanguage" not in lang:
-            raise TiaError("WRONG_LANGUAGE",
-                f"Baustein '{block_name}' ist {lang}, kein SCL — set_plc_block_source nur für SCL.", True)
+        if block:
+            lang = str(getattr(block, "ProgrammingLanguage", ""))
+            if "SCL" not in lang.upper():
+                raise TiaError("WRONG_LANGUAGE",
+                    f"Baustein '{block_name}' ist {lang}, kein SCL — set_plc_block_source nur fuer SCL.", True)
 
-        # Aktuelles XML exportieren und SCL-Body ersetzen
-        out_dir  = _export_dir()
-        xml_file = out_dir / f"{block_name}_set.xml"
-        if xml_file.exists(): xml_file.unlink()
-        block.Export(FileInfo(str(xml_file)), eng.ExportOptions.WithDefaults)
-        xml_content = xml_file.read_text(encoding="utf-8")
+        out_dir = _export_dir()
+        src_file = out_dir / f"{block_name}_set.scl"
 
-        import re as _re
+        m = _SCL_HEADER_RE.search(scl_source)
+        if m:
+            mode = "full"
+            if m.group(2) != block_name:
+                raise TiaError("BLOCK_NAME_MISMATCH",
+                    f"Quelle definiert '{m.group(2)}', erwartet '{block_name}'.", True)
+            source_text = scl_source
+        else:
+            mode = "body"
+            if not block:
+                raise TiaError("BLOCK_NOT_FOUND",
+                    f"Baustein '{block_name}' nicht gefunden. Fuer neue Bausteine den "
+                    "vollstaendigen Quelltext (FUNCTION_BLOCK ... END_FUNCTION_BLOCK) uebergeben.", True)
+            gen_file = out_dir / f"{block_name}_gen.scl"
+            if gen_file.exists(): gen_file.unlink()
+            items = List[IGenerateSource]()
+            items.Add(block)
+            plc.ExternalSourceGroup.GenerateSource(items, FileInfo(str(gen_file)), getattr(GenerateOptions, "None"))
+            gen = gen_file.read_text(encoding="utf-8-sig")
+            b = _SCL_BEGIN_RE.search(gen)
+            e = list(_SCL_END_RE.finditer(gen))
+            if not b or not e:
+                raise TiaError("SCL_SOURCE_UNEXPECTED",
+                    "BEGIN / END_... in generierter Quelle nicht gefunden.", False,
+                    {"source_path": str(gen_file)})
+            source_text = gen[:b.end()] + "\n" + scl_source.strip("\r\n") + "\n" + gen[e[-1].start():]
 
-        # Höchste vorhandene UId im XML ermitteln
-        existing_uids = [int(u) for u in _re.findall(r'UId="(\d+)"', xml_content)]
-        uid_start = max(existing_uids) + 1 if existing_uids else 100
+        source_text = source_text.replace("\r\n", "\n").replace("\n", "\r\n")
+        src_file.write_text(source_text, encoding="utf-8-sig", newline="")
 
-        def _scl_to_tokens(code: str, uid: int) -> str:
-            """SCL-Code zeilenweise in Token-Elemente mit UId umwandeln."""
-            def esc(s):
-                return (s.replace("&", "&amp;")
-                          .replace("<", "&lt;")
-                          .replace(">", "&gt;")
-                          .replace('"', "&quot;")
-                          .replace("\r\n", "&#xD;&#xA;")
-                          .replace("\n",   "&#xD;&#xA;")
-                          .replace("\r",   "&#xD;&#xA;"))
-            parts = []
-            for line in code.splitlines(keepends=True):
-                e = esc(line)
-                if e:
-                    parts.append(f'<Token Text="{e}" UId="{uid}" />')
-                    uid += 1
-            return "\n              ".join(parts)
+        # Zielgruppe: bestehender Baustein bleibt in seiner Untergruppe
+        target_group = None
+        if block:
+            grp = block.Parent
+            if type(grp).__name__ == "PlcBlockUserGroup":
+                target_group = grp
 
-        new_xml  = xml_content
-        replaced = False
-        token_xml = _scl_to_tokens(scl_source, uid_start)
+        sources = plc.ExternalSourceGroup.ExternalSources
+        src_name = f"MCP_{block_name}"
+        old = sources.Find(src_name)
+        if old: old.Delete()
+        src = sources.CreateFromFile(src_name, str(src_file))
+        try:
+            if target_group is not None:
+                created = src.GenerateBlocksFromSource(target_group, getattr(GenerateBlockOption, "None"))
+            else:
+                created = src.GenerateBlocksFromSource(getattr(GenerateBlockOption, "None"))
+        except Exception as ex:
+            msg = [l.strip() for l in str(ex).splitlines() if l.strip() and not l.strip().startswith("bei ")]
+            raise TiaError("SCL_GENERATE_FAILED",
+                "Baustein konnte nicht aus der Quelle erzeugt werden: " + " | ".join(msg[:6]), True,
+                {"source_path": str(src_file), "mode": mode})
+        finally:
+            try: src.Delete()
+            except Exception: pass
 
-        # V21 Self-Closing: <StructuredText ... />
-        sc_pat = r'<StructuredText(\b[^>]*)\/>'
-        m_sc   = _re.search(sc_pat, new_xml)
-        if m_sc:
-            attrs = m_sc.group(1)
-            replacement = f'<StructuredText{attrs}>\n              {token_xml}\n            </StructuredText>'
-            new_xml = _re.sub(sc_pat, replacement, new_xml, count=1)
-            replaced = True
-
-        # V21 Container mit vorhandenen Tokens ersetzen
-        if not replaced:
-            cont_pat = r'(<StructuredText\b[^>]*>)(.*?)(</StructuredText>)'
-            if _re.search(cont_pat, new_xml, _re.DOTALL):
-                new_xml = _re.sub(cont_pat,
-                    lambda m: m.group(1) + f'\n              {token_xml}\n            ' + m.group(3),
-                    new_xml, flags=_re.DOTALL, count=1)
-                replaced = True
-
-        # V19/V20 Fallback
-        if not replaced:
-            for tag in ["Body", "SourceText"]:
-                pat = rf"(<{tag}[^>]*>)(.*?)(</{tag}>)"
-                if _re.search(pat, new_xml, _re.DOTALL):
-                    new_xml = _re.sub(pat,
-                        lambda x: x.group(1) + scl_source + x.group(3),
-                        new_xml, flags=_re.DOTALL)
-                    replaced = True
-                    break
-
-        if not replaced:
-            raise TiaError("SCL_TAG_NOT_FOUND",
-                f"Kein SCL-Tag in XML von '{block_name}' gefunden.", False)
-
-        xml_file.write_text(new_xml, encoding="utf-8")
-
-        # Import — Baustein liegt ggf. in Untergruppe
-        def _find_group(plc_sw, bname):
-            stack = [plc_sw.BlockGroup]
-            while stack:
-                grp = stack.pop()
-                for b in grp.Blocks:
-                    if b.Name == bname:
-                        return grp
-                for sub in grp.Groups:
-                    stack.append(sub)
-            return plc_sw.BlockGroup
-
-        target_group = _find_group(plc, block_name)
-        result = target_group.Blocks.Import(FileInfo(str(xml_file)), eng.ImportOptions.Override)
-        _log("plc").info(f"SCL gesetzt: {block_name}")
-        return {"status": "ok", "block": block_name, "language": lang,
-                "xml_path": str(xml_file),
-                "blocks": [str(b) for b in result] if result else []}
-    return sta.run(_tia_call, _run)
+        # Erzeugter Baustein ist inkonsistent und Syntaxfehler fallen erst beim
+        # Uebersetzen auf — daher direkt den Baustein uebersetzen.
+        new_block = _find_block(plc, block_name)
+        errors, warnings, messages = _compile(new_block)
+        _log("plc").info(f"SCL gesetzt ({mode}): {block_name} — {errors} Fehler, {warnings} Warnungen")
+        return {"status": "ok" if errors == 0 else "error", "block": block_name, "mode": mode,
+                "source_path": str(src_file),
+                "compile": {"errors": errors, "warnings": warnings, "messages": messages[:20]}}
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATEI-HILFSFUNKTIONEN
@@ -3439,6 +3459,64 @@ def read_export_file(file_path: str) -> dict:
 # KOMPILIEREN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _compile(obj):
+    """ICompilable-Service von obj (PlcSoftware oder PlcBlock) ausfuehren.
+    Rueckgabe: (ErrorCount, WarningCount, Meldungen). Meldungen sind hierarchisch —
+    die eigentlichen Fehlertexte stehen in den Blaettern."""
+    compiler = obj.GetService[_compilable_type(obj)]()
+    if not compiler:
+        raise TiaError("COMPILE_NOT_SUPPORTED",
+            "Kein Compiler-Service verfuegbar.", False)
+    result = compiler.Compile()
+    messages = []
+    def _walk(msgs, path):
+        for msg in msgs:
+            desc = str(msg.Description)
+            sub = list(getattr(msg, "Messages", []) or [])
+            p = f"{path}/{msg.Path}" if path and str(getattr(msg, "Path", "")) else str(getattr(msg, "Path", "")) or path
+            if sub:
+                _walk(sub, p)
+            elif str(msg.State) in ("Error", "Warning"):
+                messages.append({"severity": str(msg.State), "description": desc, "path": p})
+    try:
+        _walk(result.Messages, "")
+    except Exception:
+        pass
+    return result.ErrorCount, result.WarningCount, messages
+
+def _compilable_type(obj):
+    # ICompilable liegt in V21 in Siemens.Engineering.Base (Compiler-Namespace).
+    # Strategie: alle geladenen Assemblies nach dem Typ durchsuchen.
+    compilable_type = None
+    step7_asm = obj.GetType().Assembly
+    # 1) Direkt aus Step7-Assembly
+    compilable_type = step7_asm.GetType("Siemens.Engineering.Compiler.ICompilable")
+    # 2) Aus Base-Assembly (referenziert von Step7)
+    if not compilable_type:
+        for ref in step7_asm.GetReferencedAssemblies():
+            if "Base" in str(ref.Name):
+                try:
+                    import System.Reflection as refl
+                    base_asm = refl.Assembly.Load(ref)
+                    compilable_type = base_asm.GetType(
+                        "Siemens.Engineering.Compiler.ICompilable")
+                    if compilable_type:
+                        break
+                except Exception:
+                    pass
+    # 3) Fallback: Namespace direkt importieren
+    if not compilable_type:
+        try:
+            from Siemens.Engineering.Compiler import ICompilable
+            compilable_type = ICompilable
+        except Exception:
+            pass
+
+    if not compilable_type:
+        raise TiaError("COMPILE_NOT_SUPPORTED",
+            "ICompilable nicht gefunden — Siemens.Engineering.Base.dll pruefen.", False)
+    return compilable_type
+
 def compile_plc(device_name):
     """SPS kompilieren — behebt inkonsistente Bausteine vor dem Export."""
     def _run():
@@ -3448,63 +3526,14 @@ def compile_plc(device_name):
         if not plc:
             raise TiaError("PLC_NOT_FOUND", f"PLC '{device_name}' nicht gefunden.", True)
 
-        # ICompilable liegt in V21 in Siemens.Engineering.Base (Compiler-Namespace).
-        # Strategie: alle geladenen Assemblies nach dem Typ durchsuchen.
-        compilable_type = None
-        step7_asm = plc.GetType().Assembly
-        # 1) Direkt aus Step7-Assembly
-        compilable_type = step7_asm.GetType("Siemens.Engineering.Compiler.ICompilable")
-        # 2) Aus Base-Assembly (referenziert von Step7)
-        if not compilable_type:
-            for ref in step7_asm.GetReferencedAssemblies():
-                if "Base" in str(ref.Name):
-                    try:
-                        import System.Reflection as refl
-                        base_asm = refl.Assembly.Load(ref)
-                        compilable_type = base_asm.GetType(
-                            "Siemens.Engineering.Compiler.ICompilable")
-                        if compilable_type:
-                            break
-                    except Exception:
-                        pass
-        # 3) Fallback: Namespace direkt importieren
-        if not compilable_type:
-            try:
-                from Siemens.Engineering.Compiler import ICompilable
-                compilable_type = ICompilable
-            except Exception:
-                pass
-
-        if not compilable_type:
-            raise TiaError("COMPILE_NOT_SUPPORTED",
-                "ICompilable nicht gefunden — Siemens.Engineering.Base.dll pruefen.", False)
-
-        compiler = plc.GetService[compilable_type]()
-        if not compiler:
-            raise TiaError("COMPILE_NOT_SUPPORTED",
-                "Kein Compiler-Service verfuegbar.", False)
-
-        result = compiler.Compile()
-        status = "ok" if result.ErrorCount == 0 else "error"
+        errors, warnings, messages = _compile(plc)
         _log("compile").info(
-            f"Kompiliert {device_name}: {result.ErrorCount} Fehler, {result.WarningCount} Warnungen")
-
-        messages = []
-        try:
-            for msg in result.Messages:
-                messages.append({
-                    "severity":    str(msg.Severity),
-                    "description": str(msg.Description),
-                    "path":        str(getattr(msg, "Path", ""))
-                })
-        except Exception:
-            pass
-
+            f"Kompiliert {device_name}: {errors} Fehler, {warnings} Warnungen")
         return {
-            "status":   status,
+            "status":   "ok" if errors == 0 else "error",
             "device":   device_name,
-            "errors":   result.ErrorCount,
-            "warnings": result.WarningCount,
+            "errors":   errors,
+            "warnings": warnings,
             "messages": messages[:20]
         }
     return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)

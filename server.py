@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.14.0"
+VERSION      = "1.14.1"
 VERSION_DATE = "2026-09-26"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -172,7 +172,7 @@ und Standardstrukturen anlegen (PLC, HMI Advanced/Unified, Bibliotheken).
   export_plc_block(device, block, path?)       → Baustein als XML exportieren
   import_plc_block(device, file_path)          → Baustein aus XML importieren
   get_plc_block_source(device, block, path?)   → Quellcode lesen (SCL: Text, LAD/FBD: XML)
-  set_plc_block_source(device, block, scl)     → SCL-Quellcode direkt schreiben
+  set_plc_block_source(device, block, scl)     → SCL schreiben: ganzer Baustein oder nur Rumpf (offline)
   export_plc_tagtable(device, table, path?)    → PLC Tag-Tabelle exportieren
   import_plc_tagtable(device, file_path)       → PLC Tag-Tabelle importieren
 
@@ -809,10 +809,13 @@ async def list_tools():
           {"device_name":{"type":"string"},"file_path":{"type":"string"}},
           ["device_name","file_path"]),
         T("set_plc_block_source",
-          "SCL-Quellcode direkt in einen Baustein schreiben. Gegenstück zu get_plc_block_source. "
-          "Nur für SCL-Bausteine. scl_source = SCL-Code als String.",
+          "SCL-Quellcode in einen Baustein schreiben (ueber externe Quelle, TIA uebersetzt selbst). "
+          "scl_source = entweder vollstaendiger Baustein (FUNCTION_BLOCK \"Name\" ... END_FUNCTION_BLOCK, "
+          "ersetzt Schnittstelle + Rumpf, legt Baustein ggf. neu an) oder nur der Rumpf "
+          "(Anweisungen zwischen BEGIN und END_..., Schnittstelle bleibt). "
+          "Nur offline — vorher go_offline. Bei Syntaxfehlern: SCL_GENERATE_FAILED mit TIA-Meldungen.",
           {"device_name":{"type":"string"},"block_name":{"type":"string"},
-           "scl_source":{"type":"string","description":"SCL-Quellcode als String"}},
+           "scl_source":{"type":"string","description":"Vollstaendiger SCL-Baustein oder nur Rumpf"}},
           ["device_name","block_name","scl_source"]),
 
         # DATEI-HILFSFUNKTIONEN

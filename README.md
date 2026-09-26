@@ -132,8 +132,8 @@ attach_project / open_project
 | `list_plc_tag_tables` | `device_name` | Alle Tag-Tabellen auflisten |
 | `list_plc_tags` | `device_name`, `table_name` | Tags einer Tabelle auflisten |
 | `list_plc_udts` | `device_name` | Alle UDTs/Strukturen auflisten |
-| `get_plc_block_source` | `device_name`, `block_name` | SCL-Quellcode lesen |
-| `set_plc_block_source` | `device_name`, `block_name`, `scl_source` | SCL-Quellcode schreiben¹ |
+| `get_plc_block_source` | `device_name`, `block_name` | SCL-Quellcode lesen (vollständiger Baustein inkl. Schnittstelle, via `GenerateSource`) |
+| `set_plc_block_source` | `device_name`, `block_name`, `scl_source` | SCL schreiben — ganzer Baustein oder nur Rumpf, danach übersetzt¹ |
 | `export_plc_block` | `device_name`, `block_name` | Baustein als XML exportieren |
 | `import_plc_block` | `device_name`, `file_path` | Baustein aus XML importieren |
 | `export_plc_tagtable` | `device_name`, `table_name` | PLC-Tag-Tabelle exportieren |
@@ -142,7 +142,7 @@ attach_project / open_project
 | `set_plc_config` | `device_name`, `settings` | CPU-Attribute schreiben (schreibgeschützte werden übersprungen) |
 | `export_plc_config` | `device_name`, [`output_path`] | CPU-Konfiguration als Excel exportieren, gruppiert nach Kategorien |
 
-¹ Nur einfache SCL-Anweisungen ohne Keywords/Kommentare. Für komplexen SCL: Export → XML bearbeiten → Import.
+¹ Läuft über eine externe Quelle (`PlcExternalSource.GenerateBlocksFromSource`), TIA übersetzt den Text selbst. `scl_source` = vollständiger Baustein (`FUNCTION_BLOCK "Name" … END_FUNCTION_BLOCK` — ersetzt Schnittstelle + Rumpf, legt den Baustein ggf. neu an) oder nur der Rumpf (Schnittstelle bleibt). Danach wird der Baustein übersetzt; Fehler kommen als `status:error` mit `compile.messages` (Text + Zeile). Nur offline (`PLC_ONLINE` sonst).
 
 ² Ohne Verbindungsparameter wird die im Projekt gespeicherte Verbindung genutzt. Die Anmeldung läuft über den V21-Event `ConnectionConfiguration.OnlineLegitimation`:
 ohne `user`/`password` anonym (falls die SPS `AnonymousUser` erlaubt), sonst Benutzer/Passwort. Einem TLS-Zertifikat der SPS wird nur mit `trust_certificate=true` vertraut.
@@ -274,10 +274,10 @@ Bereich-Referenz basierend auf TIA Portal Projektbaum. ✅ implementiert · ⚠�
 | Tag-Tabellen auflisten | `list_plc_tag_tables` | ✅ inkl. Untergruppen |
 | Tags auflisten | `list_plc_tags` | ✅ mit Typ, Adresse, Kommentar |
 | UDTs auflisten | `list_plc_udts` | ✅ inkl. Untergruppen |
-| Bausteine lesen (SCL) | `get_plc_block_source` | ✅ |
+| Bausteine lesen (SCL) | `get_plc_block_source` | ✅ vollständige Quelle |
 | Bausteine exportieren (XML) | `export_plc_block` | ✅ |
 | Bausteine importieren | `import_plc_block` | ✅ |
-| SCL schreiben | `set_plc_block_source` | ⚠️ nur einfache Anweisungen |
+| SCL schreiben | `set_plc_block_source` | ✅ ganzer Baustein oder Rumpf, mit Übersetzen |
 | Kompilieren | `compile_plc` | ✅ |
 | Online / Offline gehen | `go_online`, `go_offline`, `get_online_state` | ✅ inkl. Anmeldung / TLS-Zertifikat |
 | Tag-Tabellen exportieren | `export_plc_tagtable` | ✅ |
@@ -448,6 +448,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.14.1 | 2026-09-26 | `set_plc_block_source` neu über externe Quelle statt selbst gebautem Token-XML (Fehler *"The token is not supported"* bei jedem echten SCL-Code); ganzer Baustein oder Rumpf; anschließendes Übersetzen mit Fehlertexten. `get_plc_block_source` liefert lesbares SCL via `GenerateSource`. `compile_plc` liefert die eigentlichen Fehlermeldungen (vorher leer). |
 | 1.14.0 | 2026-09-26 | `get_online_state`, `go_online`, `go_offline` — SPS online/offline via `OnlineProvider` inkl. `OnlineLegitimation`-Handler (anonym / Benutzer / Passwort / TLS-Zertifikat). `server.py` und `tia.py` wieder auf gleicher Version. `SyntaxWarning` im `server.py`-Docstring behoben. |
 | 1.13.1–1.13.4 | 2026-06-17 | STA-Loop / recoverable TiaErrors nur noch DEBUG-Log; `_get_hmi` akzeptiert device.Name und item.Name |
 | 1.13.0 | 2026-06-16 | `export/import_hmi_alarms` — JSON-basiert via GetAttributeInfos (kein V21-API-Export); `list_hmi_alarms` erweitert (alle Attribute) |

@@ -45,6 +45,21 @@
 
 ---
 
+## 2b — Verbindungsstabilität — v1.15.0
+
+| # | Test | Erwartung | Status | Notiz |
+|---|---|---|:---:|---|
+| 2b.1 | `connect_portal`, dann 3 min nichts tun und in der TIA-Oberfläche arbeiten | TIA bleibt bedienbar; Log: „nach 120s Leerlauf getrennt“ | ⬜ | |
+| 2b.2 | Nach 2b.1 beliebiges Tool (z. B. `list_devices`) ohne erneutes `connect_portal` | Läuft; Log: „Automatisch neu verbunden“; Projekt wieder übernommen | ⬜ | |
+| 2b.3 | `disconnect_portal` | `disconnected:true`; TIA sofort frei | ⬜ | |
+| 2b.4 | Aufruf, der in TIA einen Dialog auslöst (z. B. HMI-Verbindung per `execute_openness` anlegen) | Kein Hänger; Log `tia.dialog`: Rückfrage → Cancel/No | ⬜ | |
+| 2b.5 | Mehrere TIA-Instanzen offen, `connect_portal` | Prozess mit dem gemerkten bzw. einzigen offenen Projekt wird gewählt; `tia_processes` in der Antwort | ⬜ | |
+| 2b.6 | `create_project` | Projekt wird angelegt (vorher NameError `portal`) | ⬜ | |
+| 2b.7 | `execute_openness` mit `secure_string('x')`, `dir_info('C:/')` | Kein Absturz des Servers | ⬜ | |
+| 2b.8 | Offline-Tests (ohne TIA): Prozessauswahl, Leerlauf-Trennung, Timeout ohne zweiten STA-Thread, Sandbox-Sperren | alle ok | ✅ | 2026-10-03, mit Attrappen |
+
+---
+
 ## 3 — PLC: Lesen
 
 > `device_name` = DeviceItem-Name (z.B. `PLC_1`). Im Zweifel zuerst `list_devices` aufrufen.  

@@ -6,13 +6,20 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.14.1"
-VERSION_DATE = "2026-09-26"
+VERSION      = "1.15.0"
+VERSION_DATE = "2026-10-03"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.15.0: TIA-Haenger behoben — STA-Thread pumpt Window-Messages; Openness-Verbindung wird nach "
+        "Leerlauf getrennt (TIA_MCP_IDLE_DISCONNECT, Standard 120 s) und beim naechsten Aufruf automatisch "
+        "neu aufgebaut; alte Verbindungen werden per Dispose freigegeben (connect_portal, Timeout); nach "
+        "Timeout kein zweiter STA-Thread mehr; TIA-Rueckfragen werden abgebrochen statt zu blockieren "
+        "(TIA_MCP_DIALOGS); connect_portal waehlt den richtigen TIA-Prozess; close_portal beendet nur den "
+        "eigenen Prozess. Neu: disconnect_portal. Fix: create_project, open_portal. Sandbox: Exception, "
+        "secure_string, dir_info, file_info.",
         "1.14.1: set_plc_block_source — ueber externe Quelle (GenerateSource / GenerateBlocksFromSource) "
         "statt Token-XML; ganzer Baustein oder nur Rumpf; Offline-Pruefung; Baustein wird danach "
         "uebersetzt (Fehler mit Zeile). get_plc_block_source liefert SCL via GenerateSource "
@@ -42,7 +49,7 @@ VERSION_INFO = {
     ]
 }
 
-import os, sys, threading, queue, logging, textwrap, re
+import os, sys, threading, queue, logging, textwrap, re, time
 from pathlib import Path
 from typing import Any, Callable
 from logging.handlers import RotatingFileHandler
@@ -115,6 +122,12 @@ def _tia_call(fn, *args, **kwargs):
 
 _STA_TIMEOUT_DEFAULT  = 60   # Sekunden für normale Operationen
 _STA_TIMEOUT_HEAVY    = 300  # Sekunden für schwere Ops: open_project, compile, close_portal
+_STA_POLL_S           = 0.05 # Wartezeit je Durchlauf, dazwischen werden Window-Messages gepumpt
+
+# Openness-Verbindung nach so vielen Sekunden ohne Aufruf trennen (0 = nie).
+# Eine offene Verbindung blockiert sonst die TIA-Oberflaeche, wenn dort gearbeitet wird.
+# Der naechste Aufruf verbindet automatisch neu (siehe _Session.ensure_portal).
+_IDLE_DISCONNECT_S = float(os.environ.get("TIA_MCP_IDLE_DISCONNECT", "120"))
 
 @dataclass
 class _Job:
@@ -122,6 +135,15 @@ class _Job:
 
 class _Err:
     def __init__(self, e): self.exception = e
+
+def _pump_messages():
+    """Window-Messages des STA-Threads abarbeiten. Ohne Pumpe warten Rueckrufe von
+    TIA (Events, Lebenszeichen) endlos und die TIA-Oberflaeche friert ein."""
+    try:
+        import pythoncom
+        pythoncom.PumpWaitingMessages()
+    except ImportError:
+        pass
 
 class STAThread:
     _instance = None; _lock = threading.Lock()
@@ -132,14 +154,23 @@ class STAThread:
                 cls._instance = super().__new__(cls)
                 cls._instance._started = False
                 cls._instance._thread  = None
+                cls._instance._generation = 0
+                cls._instance._last_job = time.monotonic()
         return cls._instance
+
+    def _spawn(self):
+        """Neuen STA-Thread mit eigener Queue starten. Die Generation sorgt dafuer,
+        dass ein alter, nach Timeout verwaister Thread keine neuen Jobs mehr annimmt."""
+        self._generation += 1
+        self._q = queue.Queue()
+        self._thread = threading.Thread(target=self._loop, args=(self._q, self._generation),
+                                        name=f"TIA-STA-{self._generation}", daemon=True)
+        self._thread.start()
+        self._started = True
 
     def start(self):
         if self._started: return
-        self._q: queue.Queue = queue.Queue()
-        self._thread = threading.Thread(target=self._loop, name="TIA-STA", daemon=True)
-        self._thread.start()
-        self._started = True
+        self._spawn()
         _log("sta").info("STA Thread gestartet")
 
     def stop(self):
@@ -148,15 +179,12 @@ class STAThread:
         _log("sta").info("STA Thread gestoppt")
 
     def _restart(self):
-        """STA-Thread neu starten nach Timeout. Session-Handles zurücksetzen."""
+        """STA-Thread neu starten nach Timeout. Alte Portal-Instanz im Hintergrund
+        freigeben, damit TIA nicht auf den haengenden Client wartet."""
         _log("sta").warning("STA Thread neu gestartet nach Timeout.")
         self._started = False
-        _sess.portal  = None
-        _sess.project = None
-        self._q = queue.Queue()
-        self._thread = threading.Thread(target=self._loop, name="TIA-STA", daemon=True)
-        self._thread.start()
-        self._started = True
+        _sess.release_async()
+        self._spawn()
 
     def run(self, fn, *args, timeout=None, **kwargs):
         if not self._started: raise RuntimeError("STAThread nicht gestartet")
@@ -172,19 +200,24 @@ class STAThread:
                 "STA_TIMEOUT",
                 f"TIA-Operation hat nach {t}s nicht geantwortet. "
                 "STA-Thread wurde neu gestartet. "
-                "Bitte connect_portal + attach_project erneut aufrufen.",
+                "Wartet in TIA ein Dialog? Der naechste Aufruf verbindet automatisch neu.",
                 True,
-                {"hint": "STA thread restarted, session handles reset"}
+                {"hint": "STA thread restarted, portal released"}
             )
         if isinstance(out, _Err): raise out.exception
         return out
 
-    def _loop(self):
+    def _loop(self, q, generation):
         try:
             import pythoncom; pythoncom.CoInitialize()
         except ImportError: pass
-        while True:
-            job = self._q.get()
+        while generation == self._generation:
+            try:
+                job = q.get(timeout=_STA_POLL_S)
+            except queue.Empty:
+                _pump_messages()
+                self._check_idle()
+                continue
             if job is None: break
             try:
                 job.result_q.put(job.fn(*job.args, **job.kwargs))
@@ -195,9 +228,20 @@ class STAThread:
                 else:
                     _log("sta").error(str(e), exc_info=True)
                 job.result_q.put(_Err(e))
+            finally:
+                self._last_job = time.monotonic()
+        if generation != self._generation:
+            _log("sta").info(f"Verwaister STA-Thread {generation} beendet.")
         try:
             import pythoncom; pythoncom.CoUninitialize()
         except ImportError: pass
+
+    def _check_idle(self):
+        if (_IDLE_DISCONNECT_S > 0 and _sess.portal is not None
+                and time.monotonic() - self._last_job > _IDLE_DISCONNECT_S):
+            _log("session").info(f"Openness-Verbindung nach {_IDLE_DISCONNECT_S:.0f}s Leerlauf getrennt "
+                                 "(naechster Aufruf verbindet automatisch neu).")
+            _sess.release()
 
 sta = STAThread()
 
@@ -262,16 +306,147 @@ class _Session:
         _log("session").info(f"TIA {self.tia_version} DLLs geladen aus {self.dll_path}")
         self._dlls_loaded = True
 
+    # Fuer automatisches Neuverbinden nach Leerlauf-Trennung / Timeout (nur attach-Modus)
+    auto_reconnect = False; pid = None; project_path = None
+    _handlers = None   # Referenzen auf Dialog-Handler (gegen Garbage Collection)
+
     def ensure_portal(self):
+        if not self.portal and self.auto_reconnect:
+            self._reattach()
         if not self.portal:
             raise TiaError("NOT_CONNECTED","Nicht verbunden. connect_portal aufrufen.",True)
 
     def ensure_project(self):
         self.ensure_portal()
+        if not self.project and self.auto_reconnect and self.project_path:
+            self.project = _find_project(self.portal, self.project_path)
         if not self.project:
             raise TiaError("NO_PROJECT","Kein Projekt. open_project aufrufen.",True)
 
+    def remember_project(self, project):
+        self.project = project
+        try: self.project_path = str(project.Path)
+        except Exception: self.project_path = None
+
+    def _reattach(self):
+        """Erneut an denselben TIA-Prozess anhaengen (nur im STA-Thread aufrufen)."""
+        from Siemens.Engineering import TiaPortal
+        proc = _pick_process(list(TiaPortal.GetProcesses()), self.pid, self.project_path)
+        if proc is None:
+            self.auto_reconnect = False
+            raise TiaError("NO_PORTAL_PROCESS", "TIA-Prozess fuer Neuverbindung nicht gefunden. "
+                           "connect_portal aufrufen.", True)
+        self.attach(proc)
+        _log("session").info(f"Automatisch neu verbunden: PID={proc.Id}")
+
+    def attach(self, proc):
+        self.release()
+        self.portal = proc.Attach()
+        self.pid = proc.Id
+        _install_dialog_handlers(self.portal)
+
+    def release(self):
+        """Openness-Verbindung freigeben (Dispose). Im STA-Thread aufrufen."""
+        p, self.portal, self.project, self._handlers = self.portal, None, None, None
+        if p is None:
+            return
+        try:
+            p.Dispose()
+        except Exception as e:
+            _log("session").warning(f"Dispose fehlgeschlagen (ignoriert): {e}")
+
+    def release_async(self, wait_s=5):
+        """Freigabe aus fremdem Thread (nach STA-Timeout): Dispose in Hilfs-Thread, damit
+        ein haengender TIA-Aufruf den Aufrufer nicht mitblockiert."""
+        p, self.portal, self.project, self._handlers = self.portal, None, None, None
+        if p is None:
+            return
+        t = threading.Thread(target=lambda: _safe_dispose(p), name="TIA-Dispose", daemon=True)
+        t.start(); t.join(wait_s)
+        if t.is_alive():
+            _log("session").warning(f"Dispose nach Timeout dauert > {wait_s}s — laeuft im Hintergrund weiter.")
+
 _sess = _Session()
+
+def _safe_dispose(portal):
+    try:
+        portal.Dispose()
+    except Exception as e:
+        _log("session").warning(f"Dispose fehlgeschlagen (ignoriert): {e}")
+
+def _norm_path(p):
+    return str(p).replace("/", "\\").rstrip("\\").lower() if p else ""
+
+def _find_project(portal, path):
+    for pr in portal.Projects:
+        try:
+            if _norm_path(pr.Path) == _norm_path(path):
+                return pr
+        except Exception:
+            pass
+    return None
+
+def _pick_process(procs, pid=None, project_path=None):
+    """TIA-Prozess waehlen: gleiche PID > Prozess mit dem gesuchten Projekt >
+    einziger Prozess mit offenem Projekt > erster Prozess."""
+    if not procs:
+        return None
+    if pid is not None:
+        for p in procs:
+            if p.Id == pid:
+                return p
+    def proj(p):
+        try: return str(p.ProjectPath) if p.ProjectPath else ""
+        except Exception: return ""
+    if project_path:
+        for p in procs:
+            if _norm_path(proj(p)) == _norm_path(project_path):
+                return p
+    with_project = [p for p in procs if proj(p)]
+    if len(with_project) == 1:
+        return with_project[0]
+    return procs[0]
+
+# Verhalten bei TIA-Rueckfragen waehrend eines Openness-Aufrufs:
+#   "cancel" (Standard): mit Abbrechen/Nein beantworten -> Aufruf scheitert mit Meldung statt zu haengen
+#   "off":               nicht eingreifen (Dialog erscheint in der Oberflaeche, Aufruf wartet)
+_DIALOG_MODE = os.environ.get("TIA_MCP_DIALOGS", "cancel").lower()
+
+def _install_dialog_handlers(portal):
+    if _DIALOG_MODE == "off":
+        return
+    log = _log("dialog")
+    try:
+        from Siemens.Engineering import ConfirmationResult
+    except Exception as e:
+        log.warning(f"ConfirmationResult nicht verfuegbar, keine Dialog-Handler: {e}")
+        return
+
+    def on_confirmation(sender, e):
+        try:
+            choices = str(e.Choices)
+            pick = next((c for c in ("Cancel", "No") if c in choices), None)
+            if pick:
+                e.Result = getattr(ConfirmationResult, pick)
+                e.IsHandled = True
+            log.warning(f"TIA-Rueckfrage -> {pick or 'nicht beantwortet'} | {e.Caption}: {e.Text} "
+                        f"(Optionen: {choices})")
+        except Exception as ex:
+            log.error(f"Confirmation-Handler: {ex}")
+
+    def on_notification(sender, e):
+        try:
+            e.IsHandled = True
+            log.warning(f"TIA-Meldung quittiert | {e.Caption}: {e.Text} {getattr(e, 'DetailText', '') or ''}")
+        except Exception as ex:
+            log.error(f"Notification-Handler: {ex}")
+
+    try:
+        portal.Confirmation += on_confirmation
+        portal.Notification += on_notification
+        _sess._handlers = (on_confirmation, on_notification)
+    except Exception as e:
+        log.warning(f"Dialog-Handler konnten nicht registriert werden: {e}")
 
 def connect_portal(mode="attach"):
     def _run():
@@ -280,13 +455,38 @@ def connect_portal(mode="attach"):
         if mode == "attach":
             procs = list(TiaPortal.GetProcesses())
             if not procs: raise TiaError("NO_PORTAL_PROCESS","TIA Portal starten.",True)
-            _sess.portal = procs[0].Attach()
-            _log("session").info(f"Attached PID={procs[0].Id} V={_sess.tia_version}")
-            return {"status":"ok","mode":"attach","tia_version":_sess.tia_version,"process_id":procs[0].Id}
+            proc = _pick_process(procs, project_path=_sess.project_path)
+            _sess.attach(proc)
+            _sess.auto_reconnect = True
+            _log("session").info(f"Attached PID={proc.Id} V={_sess.tia_version} "
+                                 f"({len(procs)} TIA-Prozess(e))")
+            return {"status":"ok","mode":"attach","tia_version":_sess.tia_version,"process_id":proc.Id,
+                    "tia_processes":len(procs)}
+        _sess.release()
+        _sess.auto_reconnect = False
         tm = TiaPortalMode.WithoutUserInterface if mode=="headless" else TiaPortalMode.WithUserInterface
         _sess.portal = TiaPortal(tm)
+        try: _sess.pid = _sess.portal.GetCurrentProcess().Id
+        except Exception: _sess.pid = None
+        _install_dialog_handlers(_sess.portal)
         _log("session").info(f"Gestartet mode={mode} V={_sess.tia_version}")
         return {"status":"ok","mode":mode,"tia_version":_sess.tia_version}
+    return sta.run(_tia_call, _run)
+
+def open_portal(mode="gui"):
+    """TIA Portal als neuen Prozess starten (gui oder headless)."""
+    if mode not in ("gui", "headless"):
+        raise TiaError("INVALID_MODE", "mode muss 'gui' oder 'headless' sein.", True)
+    return connect_portal(mode)
+
+def disconnect_portal():
+    """Openness-Verbindung trennen, TIA bleibt offen. Danach ist die TIA-Oberflaeche frei."""
+    def _run():
+        was = _sess.portal is not None
+        _sess.release()
+        _sess.auto_reconnect = False
+        _log("session").info("Openness-Verbindung getrennt (disconnect_portal).")
+        return {"status":"ok","disconnected":was}
     return sta.run(_tia_call, _run)
 
 def attach_project():
@@ -297,11 +497,26 @@ def attach_project():
         if not projects:
             raise TiaError("NO_PROJECT",
                 "Kein Projekt in TIA Portal offen. Bitte zuerst ein Projekt oeffnen.",True)
-        _sess.project = projects[0]
+        _sess.remember_project(projects[0])
         _log("session").info(f"Projekt uebernommen: {_sess.project.Name}")
         return {"status":"ok","project":_sess.project.Name,
                 "path":str(_sess.project.Path)}
     return sta.run(_tia_call, _run)
+
+def create_project(path, name=None):
+    """Neues Projekt anlegen. path = Zielordner (wird angelegt), name = Projektname."""
+    def _run():
+        _sess.ensure_portal()
+        from System.IO import DirectoryInfo
+        name_ = name or Path(path).name
+        di = DirectoryInfo(path)
+        if not di.Exists:
+            di.Create()
+        proj = _sess.portal.Projects.Create(di, name_)
+        _sess.remember_project(proj)
+        _log("session").info(f"Projekt angelegt: {proj.Name} in {path}")
+        return {"status":"ok","name":proj.Name,"path":str(proj.Path.FullName)}
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
 
 def open_project(path, retries=10, retry_delay=10):
     """
@@ -318,7 +533,7 @@ def open_project(path, retries=10, retry_delay=10):
         last_exc = None
         for attempt in range(max(1, retries)):
             try:
-                _sess.project = _sess.portal.Projects.Open(fi)
+                _sess.remember_project(_sess.portal.Projects.Open(fi))
                 _log("session").info(f"Projekt: {_sess.project.Name} (Versuch {attempt+1})")
                 return {"status":"ok","project":_sess.project.Name,"path":path}
             except Exception as e:
@@ -348,6 +563,7 @@ def close_project():
         name = _sess.project.Name
         _sess.project.Close()
         _sess.project = None
+        _sess.project_path = None
         _log("session").info(f"Projekt geschlossen: {name}")
         return {"status":"ok","closed":name}
     return sta.run(_tia_call, _run)
@@ -363,21 +579,25 @@ def close_portal():
 
     if not _sess.portal:
         raise TiaError("NOT_CONNECTED", "Nicht verbunden. connect_portal aufrufen.", True)
+    _sess.auto_reconnect = False   # nach dem Beenden nicht wieder anhaengen
+    _sess.project_path = None
 
     # PID vor dem Dispose merken — danach ist der Portal-Handle ggf. ungültig
-    pid_holder = [None]
+    # Nur den Prozess der eigenen Verbindung beenden - nie "irgendeinen" TIA-Prozess
+    pid_holder = [_sess.pid]
     def _get_pid():
         try:
             from Siemens.Engineering import TiaPortal
             procs = list(TiaPortal.GetProcesses())
-            if procs:
+            if len(procs) == 1:
                 pid_holder[0] = procs[0].Id
         except Exception:
             pass
-    try:
-        sta.run(_get_pid)
-    except Exception:
-        pass
+    if pid_holder[0] is None:
+        try:
+            sta.run(_get_pid)
+        except Exception:
+            pass
 
     # Dispose im STA-Thread mit 30s-Timeout
     done = _threading.Event()
@@ -450,6 +670,11 @@ def get_session_status():
             "portal_connected": _sess.portal  is not None,
             "project_open":     _sess.project is not None,
             "project_name":     proj_name,
+            "tia_pid":          _sess.pid,
+            "auto_reconnect":   _sess.auto_reconnect,
+            "remembered_project": _sess.project_path,
+            "idle_disconnect_s":  _IDLE_DISCONNECT_S,
+            "dialog_mode":        _DIALOG_MODE,
         }
     return sta.run(_tia_call, _run)
 
@@ -2066,12 +2291,16 @@ def get_library_type_versions(library_name, type_name):
 
 _BLOCKED_WRITE  = ["save","delete","remove","create","import","compile",
                    "download","export","update","set","add","insert","copy","move","rename"]
-_BLOCKED_ALWAYS = ["exec","eval","open","os.","sys.","subprocess","shutil","__import__","builtins"]
+_BLOCKED_ALWAYS = ["exec","eval","open","os.","sys.","subprocess","shutil","__import__","builtins",
+                   # Scan aller Assemblies der AppDomain hat TIA eingefroren
+                   "currentdomain","getassemblies"]
 _SAFE_BUILTINS  = {
     "len":len,"str":str,"int":int,"float":float,"bool":bool,"list":list,"dict":dict,
     "tuple":tuple,"set":set,"print":print,"range":range,"enumerate":enumerate,
     "zip":zip,"map":map,"filter":filter,"sorted":sorted,"hasattr":hasattr,
     "getattr":getattr,"isinstance":isinstance,"type":type,
+    "min":min,"max":max,"sum":sum,"any":any,"all":all,"round":round,"abs":abs,
+    "Exception":Exception,
     "None":None,"True":True,"False":False,
 }
 
@@ -2223,9 +2452,15 @@ def execute_openness(code, mode="read"):
     _log("executor").info(f"execute mode={mode} {len(code)}ch")
 
     def _run():
-        _sess.ensure_portal()
+        # Projekt mit uebernehmen, falls nach Leerlauf-Trennung automatisch neu verbunden wird
+        try:
+            _sess.ensure_project()
+        except TiaError as e:
+            if e.code != "NO_PROJECT":
+                raise
         import Siemens.Engineering as eng
         import Siemens.Engineering.SW as eng_sw
+        from System.IO import DirectoryInfo, FileInfo
         hmi_ns = unified_ns = None
         try: import Siemens.Engineering.Hmi as hmi_ns
         except Exception: pass
@@ -2251,6 +2486,11 @@ def execute_openness(code, mode="read"):
             # Alle Devices inkl. DeviceGroups iterieren:
             # for dev in iter_devices(): ...
             "iter_devices":  lambda: _iter_all_devices(_sess.project),
+            # .NET-Hilfen (im Sandbox gibt es kein import; Reflection auf System-Typen
+            # hat den Server frueher abstuerzen lassen)
+            "secure_string": _secure,
+            "dir_info":      lambda p: DirectoryInfo(str(p)),
+            "file_info":     lambda p: FileInfo(str(p)),
         }
         exec(textwrap.dedent(code), {"__builtins__":_SAFE_BUILTINS}, ctx)
         return {"status":"ok","mode":mode,"result":_to_json(ctx.get("result"))}

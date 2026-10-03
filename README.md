@@ -109,6 +109,7 @@ attach_project / open_project
 |---|---|---|
 | `open_portal` | `mode` (gui\|headless) | TIA Portal starten |
 | `connect_portal` | — | Laufendes Portal verbinden |
+| `disconnect_portal` | — | Openness-Verbindung trennen, TIA bleibt offen (vor Arbeit in der TIA-Oberfläche) |
 | `attach_project` | — | Geöffnetes Projekt übernehmen |
 | `open_project` | `path` | Projekt per Pfad öffnen |
 | `save_project` | — | Projekt speichern |
@@ -417,7 +418,9 @@ Tools die noch nicht implementiert sind, nach Priorität:
 - **`open_portal`** kann auf manchen Systemen >4 Minuten dauern → Timeout. Workaround: TIA manuell starten, dann `connect_portal`.
 - **`project.Save()` in `execute_openness`** — nicht unterstützt, disposed Projekt-Handle. Immer `save_project`-Tool verwenden.
 - **`CreateFB()` in `execute_openness`** — nur ProDiag. Neue Bausteine per XML-Import anlegen.
-- **STA-Thread-Timeout:** Hängende API-Aufrufe werden nach 60 Sekunden abgebrochen. Der Server bleibt verfügbar, Session-Handles werden zurückgesetzt → `connect_portal` + `attach_project` erneut aufrufen.
+- **STA-Thread-Timeout:** Hängende API-Aufrufe werden nach 60 Sekunden abgebrochen, die alte Verbindung wird freigegeben. Der nächste Aufruf verbindet automatisch neu (attach-Modus).
+- **Leerlauf-Trennung:** Nach `TIA_MCP_IDLE_DISCONNECT` Sekunden ohne Aufruf (Standard 120, `0` = aus) wird die Openness-Verbindung getrennt, damit die TIA-Oberfläche nicht blockiert. Der nächste Aufruf verbindet automatisch neu und übernimmt das Projekt wieder.
+- **TIA-Rückfragen:** Dialoge, die TIA während eines Openness-Aufrufs zeigen will, werden mit *Abbrechen/Nein* beantwortet und geloggt (`tia.dialog`), damit der Aufruf nicht hängt. `TIA_MCP_DIALOGS=off` schaltet das ab.
 - **Unified Screen-Export** — Screens sind in binären DB-Dateien eingebettet, kein Zugriff über Openness möglich.
 - **Online-Modus** — Export/Import von Bausteinen (auch `set_plc_block_source`) schlägt fehl mit *"This function is not supported in online mode"*. Vorher `go_offline` aufrufen.
 - **`GoOnline()` ohne Legitimation-Handler** — wirft eine `EngineeringTargetInvocationException` ohne Details, sobald die SPS eine Anmeldung verlangt. `go_online` registriert den Handler automatisch.
@@ -448,6 +451,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.15.0 | 2026-10-03 | TIA-Hänger behoben: STA-Thread pumpt Window-Messages; Leerlauf-Trennung mit automatischem Neuverbinden; alte Verbindungen werden per `Dispose` freigegeben (`connect_portal`, Timeout); nach Timeout kein zweiter STA-Thread mehr; TIA-Rückfragen werden abgebrochen statt zu blockieren. `connect_portal` wählt bei mehreren TIA-Instanzen den richtigen Prozess, `close_portal` beendet nur noch den eigenen. Neu: `disconnect_portal`. Fix: `create_project` (NameError) und `open_portal` (fehlte in tia.py). Sandbox: `Exception`, `secure_string`, `dir_info`, `file_info`; `CurrentDomain`/`GetAssemblies` gesperrt. |
 | 1.14.1 | 2026-09-26 | `set_plc_block_source` neu über externe Quelle statt selbst gebautem Token-XML (Fehler *"The token is not supported"* bei jedem echten SCL-Code); ganzer Baustein oder Rumpf; anschließendes Übersetzen mit Fehlertexten. `get_plc_block_source` liefert lesbares SCL via `GenerateSource`. `compile_plc` liefert die eigentlichen Fehlermeldungen (vorher leer). |
 | 1.14.0 | 2026-09-26 | `get_online_state`, `go_online`, `go_offline` — SPS online/offline via `OnlineProvider` inkl. `OnlineLegitimation`-Handler (anonym / Benutzer / Passwort / TLS-Zertifikat). `server.py` und `tia.py` wieder auf gleicher Version. `SyntaxWarning` im `server.py`-Docstring behoben. |
 | 1.13.1–1.13.4 | 2026-06-17 | STA-Loop / recoverable TiaErrors nur noch DEBUG-Log; `_get_hmi` akzeptiert device.Name und item.Name |

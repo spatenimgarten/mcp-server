@@ -17,8 +17,8 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.14.1"
-VERSION_DATE = "2026-09-26"
+VERSION      = "1.15.0"
+VERSION_DATE = "2026-10-03"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
 # Erste Instanz wird "primär": bindet Port 47823 als JSON-RPC TCP-Server und
@@ -472,6 +472,10 @@ async def list_tools():
         T("connect_portal",
           "Laufende TIA Portal Instanz uebernehmen (attach). "
           "TIA Portal muss bereits offen sein — sonst open_portal() verwenden."),
+        T("disconnect_portal",
+          "Openness-Verbindung trennen, TIA bleibt offen. Aufrufen, bevor der Anwender in der "
+          "TIA-Oberflaeche arbeitet (eine offene Verbindung kann TIA blockieren). "
+          "Nach Leerlauf (Standard 120 s) wird ohnehin automatisch getrennt."),
         T("attach_project",  "Bereits in TIA Portal geoeffnetes Projekt uebernehmen. Kein Pfad noetig."),
         T("open_project",    "Projekt oeffnen (.ap21). "
           "Nach open_portal() automatisch auf TIA Portal warten (Retry-Logik).",
@@ -873,6 +877,7 @@ def _dispatch(name, a):
     match name:
         case "open_portal":                return tia.open_portal(a.get("mode","gui"))
         case "connect_portal":             return tia.connect_portal()
+        case "disconnect_portal":          return tia.disconnect_portal()
         case "attach_project":             return tia.attach_project()
         case "open_project":               return tia.open_project(a["path"],a.get("retries",10),a.get("retry_delay",10))
         case "save_project":               return tia.save_project()
@@ -966,11 +971,7 @@ def _dispatch(name, a):
         case "set_plc_block_source":       return tia.set_plc_block_source(a["device_name"],a["block_name"],a["scl_source"])
         case "write_import_file":          return tia.write_import_file(a["filename"],a["content"])
         case "read_export_file":           return tia.read_export_file(a["file_path"])
-        case "create_project":
-            path = a["path"]
-            name_ = a.get("name", path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1])
-            proj = portal.Projects.Create(path, name_)
-            return {"status": "ok", "name": proj.Name, "path": safe_str(proj.Path)}
+        case "create_project":             return tia.create_project(a["path"], a.get("name"))
         case "restart_server":
             threading.Timer(0.5, os._exit, args=[0]).start()
             role = "primaer" if _is_primary else "proxy (Anfrage weitergeleitet)"

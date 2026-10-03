@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.15.0"
+VERSION      = "1.16.0"
 VERSION_DATE = "2026-10-03"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -772,6 +772,15 @@ async def list_tools():
           "Grafiklisten importieren. Advanced: XML-Datei. Unified: Ordner oder Datei.",
           {"device_name":{"type":"string"}, "file_path":{"type":"string"}},
           ["device_name","file_path"]),
+        T("list_hmi_tag_usage",
+          "Wo werden die HMI-Variablen verwendet? (nur Unified) Durchsucht Bilder "
+          "(Tag-/Skript-Dynamisierungen, Ereignisse), Bit-/Analogalarme, Archivierung und globale "
+          "Skriptmodule. Liefert usages (Referenz -> Fundstellen), tags (je Variable used/where) und "
+          "unused. Skripte per Textsuche: Tags(\"Name\") und passende String-Literale.",
+          {"device_name": {"type": "string"},
+           "include_scripts": {"type": "boolean", "default": True,
+                               "description": "globale Skriptmodule mit auswerten (Export in Temp-Ordner)"}},
+          ["device_name"]),
         T("list_hmi_cycles",
           "Erfassungszyklen eines HMI auflisten. Gibt Name, Periode, Einheit, system-Flag zurück.",
           {"device_name":{"type":"string"}}, ["device_name"]),
@@ -1093,6 +1102,7 @@ def _dispatch(name, a):
         case "list_hmi_graphic_lists":      return tia.list_hmi_graphic_lists(a["device_name"])
         case "export_hmi_graphic_lists":    return tia.export_hmi_graphic_lists(a["device_name"],a.get("output_path"))
         case "import_hmi_graphic_lists":    return tia.import_hmi_graphic_lists(a["device_name"],a["file_path"])
+        case "list_hmi_tag_usage":         return tia.list_hmi_tag_usage(a["device_name"], a.get("include_scripts", True))
         case "list_hmi_cycles":             return tia.list_hmi_cycles(a["device_name"])
         case "export_hmi_cycles":           return tia.export_hmi_cycles(a["device_name"],a.get("output_path"))
         case "import_hmi_cycles":           return tia.import_hmi_cycles(a["device_name"],a["file_path"])

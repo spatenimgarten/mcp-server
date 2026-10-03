@@ -6,13 +6,16 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.15.0"
+VERSION      = "1.16.0"
 VERSION_DATE = "2026-10-03"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.16.0: list_hmi_tag_usage — Verwendung der HMI-Variablen (Unified): Bilder (Tag-/Skript-"
+        "Dynamisierungen, Ereignisse, Eigenschafts-Ereignisse), Bit-/Analogalarme, Archivierung, globale "
+        "Skriptmodule; liefert usages, tags (used/where) und unused.",
         "1.15.0: TIA-Openness laeuft in eigenem Worker-Prozess (worker.py); Trennen, Leerlauf "
         "(TIA_MCP_IDLE_DISCONNECT, Standard 120 s) und Timeout beenden den Worker — nur das gibt TIA "
         "zuverlaessig frei (vorher hing TIA beim Projekt-Schliessen trotz Dispose). Naechster Aufruf "
@@ -1592,6 +1595,177 @@ def list_hmi_alarms(device_name):
                     alarms.append({"_alarm_type": kind, "_error": str(e)})
         return {"device": device_name, "hmi_type": ht, "alarms": alarms, "count": len(alarms)}
     return sta.run(_tia_call, _run)
+
+# ── Variablen-Verwendung (Unified) ─────────────────────────────────────────────
+# Skript-Zugriffe: Tags("Name"), HMIRuntime.Tags('Name'), Tags(`Name`)
+_TAG_CALL_RE = re.compile(r"""Tags\s*\(\s*(["'`])(.+?)\1""")
+_STR_LIT_RE  = re.compile(r"""(["'`])([^"'`\r\n]{1,200})\1""")
+_ALARM_TAG_ATTRS = ("RaisedStateTag", "AcknowledgmentStateTag", "AcknowledgmentControlTag", "TriggerTag")
+
+def _tag_root(ref):
+    """'HMI_RT_1::Motor1.Temperatur.Wert' / 'Messwerte[2]' -> 'Motor1' / 'Messwerte'"""
+    ref = ref.split("::", 1)[-1]
+    return re.split(r"[.\[]", ref, 1)[0]
+
+def list_hmi_tag_usage(device_name, include_scripts=True):
+    """
+    Wo werden die HMI-Variablen eines Unified-Geraets verwendet?
+    Durchsucht Bilder (Tag-/Skript-Dynamisierungen, Ereignisse, Eigenschafts-Ereignisse),
+    Bit- und Analogalarme, Archivierung (Logging-Tags) und globale Skriptmodule.
+    Skripte werden per Textsuche ausgewertet: Tags("Name") und String-Literale, die einem
+    Variablennamen entsprechen. Zusammengesetzte Namen ("Motor" + i) werden nicht erkannt.
+    """
+    def _run():
+        _sess.ensure_project()
+        sw, ht = _get_hmi(device_name)
+        if ht != "Unified":
+            raise TiaError("NOT_SUPPORTED", "list_hmi_tag_usage gibt es nur fuer WinCC Unified.", True)
+        log = _log("usage")
+        prefix = f"{device_name}::"
+        known = {}                                   # Wurzelname -> Tabelle
+        for tbl in _hmi_tag_tables(sw):
+            for t in tbl.Tags:
+                known[str(t.Name)] = str(tbl.Name)
+        usages = {}                                  # Referenz -> [Fundstellen]
+        notes = []
+        stats = {"screens": 0, "screen_items": 0, "dynamizations": 0, "scripts": 0, "alarms": 0}
+
+        def add(ref, where):
+            ref = str(ref).strip()
+            if not ref or ref.startswith("<"):       # "<No tag>"
+                return
+            if ref.startswith(prefix):
+                ref = ref[len(prefix):]
+            usages.setdefault(ref, [])
+            if where not in usages[ref]:
+                usages[ref].append(where)
+
+        def scan_code(code, where):
+            if not code:
+                return
+            stats["scripts"] += 1
+            code = str(code)
+            for m in _TAG_CALL_RE.finditer(code):
+                add(m.group(2), where)
+            for m in _STR_LIT_RE.finditer(code):       # z.B. TagSet(["A","B"]) oder Konstanten
+                lit = m.group(2).split("::", 1)[-1]
+                if _tag_root(lit) in known:
+                    add(lit, where)
+
+        def scan_handlers(obj, where):
+            for attr in ("EventHandlers", "PropertyEventHandlers"):
+                coll = getattr(obj, attr, None)
+                if coll is None:
+                    continue
+                for h in coll:
+                    sub = getattr(h, "PropertyName", None) or getattr(h, "EventType", None)
+                    try:
+                        scan_code(h.Script.ScriptCode, f"{where} / {attr[:-8]} {sub}")
+                    except Exception as e:
+                        log.debug(f"{where}: {e}")
+
+        def scan_dynamizations(obj, where):
+            coll = getattr(obj, "Dynamizations", None)
+            if coll is None:
+                return
+            for d in coll:
+                stats["dynamizations"] += 1
+                prop = str(getattr(d, "PropertyName", "?"))
+                w = f"{where} ({prop}, {str(getattr(d, 'DynamizationType', ''))})"
+                for p in d.GetType().GetProperties():
+                    n = str(p.Name)
+                    if n in ("Parent",):
+                        continue
+                    try:
+                        v = p.GetValue(d, None)
+                    except Exception:
+                        continue
+                    if v is None:
+                        continue
+                    if n == "Tag":
+                        add(v, w)
+                    elif "ScriptCode" in n:
+                        scan_code(v, w)
+                    elif n == "Trigger":
+                        try:
+                            for t in v.Tags:
+                                add(t, w + " Trigger")
+                        except Exception:
+                            pass
+                    elif isinstance(v, str) and _tag_root(v) in known:
+                        add(v, w)
+
+        # Bilder
+        for scr in _hmi_screens(sw):
+            stats["screens"] += 1
+            sname = f"Bild {scr.Name}"
+            scan_dynamizations(scr, sname)
+            scan_handlers(scr, sname)
+            for it in scr.ScreenItems:
+                stats["screen_items"] += 1
+                where = f"{sname} / {it.Name}"
+                scan_dynamizations(it, where)
+                scan_handlers(it, where)
+
+        # Alarme
+        for coll_name, kind in (("DiscreteAlarms", "Bitalarm"), ("AnalogAlarms", "Analogalarm")):
+            for a in getattr(sw, coll_name, None) or []:
+                stats["alarms"] += 1
+                where = f"{kind} {a.Name}"
+                for attr in _ALARM_TAG_ATTRS:
+                    try:
+                        add(a.GetAttribute(attr), f"{where} ({attr})")
+                    except Exception:
+                        pass
+                try:
+                    for t in a.AlarmParameterTags:
+                        add(t, f"{where} (Parameter)")
+                except Exception:
+                    pass
+
+        # Archivierung
+        for tbl in _hmi_tag_tables(sw):
+            for t in tbl.Tags:
+                try:
+                    for lt in t.LoggingTags:
+                        add(t.Name, f"Archiv {lt.GetAttribute('DataLog')} ({lt.Name})")
+                except Exception:
+                    pass
+
+        # Globale Skriptmodule: Export in Temp-Ordner, dann Textsuche
+        if include_scripts and getattr(sw, "Scripts", None) is not None:
+            import tempfile, shutil
+            from System.IO import DirectoryInfo
+            tmp = Path(tempfile.mkdtemp(prefix="tia_scripts_"))
+            try:
+                if any(True for _ in sw.Scripts):
+                    sw.Scripts.Export(DirectoryInfo(str(tmp)))
+                for f in tmp.rglob("*"):
+                    if f.is_file():
+                        try:
+                            scan_code(f.read_text(encoding="utf-8", errors="ignore"), f"Skriptmodul {f.stem}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                notes.append(f"Globale Skripte nicht ausgewertet: {e}")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        used_roots = {}
+        for ref, where in usages.items():
+            used_roots.setdefault(_tag_root(ref), []).extend(where)
+        tags = {name: {"table": tbl, "used": name in used_roots,
+                       "where": sorted(set(used_roots.get(name, [])))}
+                for name, tbl in sorted(known.items())}
+        unknown = sorted(r for r in usages if _tag_root(r) not in known)
+        if unknown:
+            notes.append("Referenzen ohne passende HMI-Variable (Systemvariablen, Tippfehler "
+                         "oder dynamische Namen): " + ", ".join(unknown[:20]))
+        return {"status": "ok", "device": device_name, "stats": stats,
+                "usages": dict(sorted(usages.items())), "tags": tags,
+                "unused": [n for n, v in tags.items() if not v["used"]],
+                "notes": notes}
+    return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
 
 def list_hmi_cycles(device_name):
     def _run():

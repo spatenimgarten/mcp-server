@@ -191,6 +191,20 @@
 
 ---
 
+## 6f — HMI: Variablen-Verwendung — v1.16.0
+
+> Testprojekt: Bild „Bericht“ mit `io_Drehzahl` (Tag-Dyn. ProcessValue = Motor1.Drehzahl, Skript-Dyn. BackColor mit `Tags("Test_Real_Temperatur")`, Ereignis Activated mit `Tags("Test_Int_Zaehler")`), Bitalarm auf Test_Bool_Start, Analogalarm auf Test_Real_Temperatur, DataLog mit 7 Logging-Tags.
+
+| # | Tool | Parameter | Status | Notiz |
+|---|---|---|:---:|---|
+| 6f.1 | `list_hmi_tag_usage` | `device_name:HMI_RT_1` | ✅ | 2026-10-03: alle 5 Arten gefunden (Tag-Dyn., Skript-Dyn., Ereignis, Bit-/Analogalarm, Archiv); `unused` = Messwerte, Motor2, Test_Array_Int, Test_Array_Real, Test_DateTime, Test_Time, Zykluszeit — korrekt |
+| 6f.2 | `list_hmi_tag_usage` über RPC-Port 47823 aus Python | — | ✅ | `json2vorlage.py --used-only --usage-column`: 8 von 50 Variablen |
+| 6f.3 | globale Skriptmodule | Modul mit `Tags("…")` anlegen | ⬜ | im Testprojekt noch kein Skriptmodul |
+| 6f.4 | Bildobjekte in Gruppen / Faceplates | — | ⬜ | noch nicht geprüft, ob `ScreenItems` gruppierte Objekte enthält |
+| 6f.5 | Großes Projekt (E500) | Laufzeit, Vollständigkeit | ⬜ | |
+
+---
+
 ## 7 — HMI: Export & Import
 
 > ⚠️ **Import-Tests nur an Testprojekt** — Override überschreibt vorhandene Daten!  

@@ -42,10 +42,22 @@ def main():
         except Exception as e:
             tia._log("worker").error(f"{e}", exc_info=True)
             out = {"ok": False, "error": {"status": "error", "code": "UNEXPECTED", "message": str(e)}}
-        _proto_out.write(json.dumps(out, ensure_ascii=False, default=str) + "\n")
-        _proto_out.flush()
+        # Antwort als reines ASCII (Sonderzeichen als \uXXXX): stdout ist eine Pipe, und Python
+        # schreibt dort unter Windows mit cp1252. Ein Zeichen ausserhalb von cp1252 (z.B. griechisches
+        # mu oder Pfeile in Variablennamen/Texten) liess das Schreiben scheitern; der Worker hing dann,
+        # bis der Server ihn nach dem Timeout beendete.
+        try:
+            data = json.dumps(out, ensure_ascii=True, default=str)
+            _proto_out.write(data + "\n")
+            _proto_out.flush()
+            if len(data) > 100000:
+                tia._log("worker").info(f"Antwort gesendet ({len(data) // 1024} KB)")
+        except Exception as e:
+            tia._log("worker").error(f"Antwort konnte nicht gesendet werden: {e}", exc_info=True)
+            os._exit(1)             # sicher beenden - sonst haelt die .NET-Laufzeit den Prozess am Leben
     tia._log("worker").info("Worker beendet (stdin geschlossen)")
     tia.teardown()
+    os._exit(0)                     # .NET-Vordergrund-Threads duerfen das Prozessende nicht verhindern
 
 
 if __name__ == "__main__":

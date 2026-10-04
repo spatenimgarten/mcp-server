@@ -494,6 +494,13 @@ def list_unified_hmis():
 
 
 def main():
+    # Variablennamen mit Zeichen ausserhalb der Konsolen-Codepage (z.B. griechisches mu)
+    # duerfen die Ausgabe nicht abbrechen
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser(
         description="Berichtsvorlagen fuer den WinCC-Unified-Bericht-Control erzeugen. "
                     f"Einstellungen in {INI_NAME} neben dem Skript.")

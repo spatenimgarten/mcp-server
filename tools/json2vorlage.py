@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-json2vorlage.py - erzeugt eine WinCC-Unified-Berichtsvorlage (.xlsx) aus der
-Offline-Konfiguration (.json) des Bericht-Controls.
+json2vorlage.py - erzeugt WinCC-Unified-Berichtsvorlagen (.xlsx) fuer den Bericht-Control.
 
 Aufruf:
-    python json2vorlage.py anlage.json
+    python json2vorlage.py                 Variablen direkt aus dem TIA-Projekt (MCP-Server)
+    python json2vorlage.py anlage.json     Variablen aus der Offline-Konfiguration (wie bisher)
 
-Alle Einstellungen stehen in json2vorlage.ini neben dem Skript (Titel, Ausgabedatei,
-Qualitaetsspalte, Filter nach Variablentabellen, nur verwendete Variablen ...).
-Die Ini-Datei ist kommentiert; fehlt sie, gelten die Standardwerte.
+Alle Einstellungen stehen in json2vorlage.ini neben dem Skript (HMI, Titel, Ausgabedatei,
+Filter, nur verwendete Variablen ...). Ohne JSON kommen Variablen, Datentypen, Tabellen und
+Verwendung ueber list_hmi_tag_usage aus dem TIA-Projekt - live ueber den MCP-Server oder aus
+verwendung_datei. Ist in der Ini keine HMI eingetragen, wird fuer jede Unified-HMI des
+Projekts eine eigene Vorlage erzeugt ({hmi} im Dateinamen).
 
 Weitere Aufrufe:
-    python json2vorlage.py anlage.json --list         Variablen nur anzeigen
-    python json2vorlage.py anlage.json --tabellen     Variablentabellen mit Anzahl Variablen anzeigen
-    python json2vorlage.py anlage.json --ini linie2.ini   andere Ini-Datei verwenden
+    python json2vorlage.py --list              Variablen nur anzeigen
+    python json2vorlage.py --tabellen          Variablentabellen mit Anzahl Variablen anzeigen
+    python json2vorlage.py --ini linie2.ini    andere Ini-Datei verwenden
 
 Ergebnis: Jede Variable steht untereinander (Spalte A Name, Spalte B Wert), UDTs und Arrays
 sind in ihre Elemente aufgeloest. Oben stehen Titel und "Erstellt am:" (Zeitpunkt der
@@ -37,7 +39,7 @@ REAL_TYPES = {"Real", "LReal", "Float", "Double"}
 
 
 # ---------------------------------------------------------------- JSON lesen --
-def read_tags(json_path, include_system=False, name_filter=None):
+def read_tags(json_path, include_system=False, name_filter=None, quiet=False):
     """Liefert [(voller_name, kurzname, datentyp)] aus der Tag-Option der Offline-JSON."""
     data = json.loads(Path(json_path).read_text(encoding="utf-8-sig"))
     tag_opt = next((o for o in data["options"].values()
@@ -61,7 +63,8 @@ def read_tags(json_path, include_system=False, name_filter=None):
                 for child in sub:
                     yield from expand(child, depth + 1)
             else:
-                print(f"Hinweis: Struktur ohne Elemente in der JSON uebersprungen: {full}")
+                if not quiet:
+                    print(f"Hinweis: Struktur ohne Elemente in der JSON uebersprungen: {full}")
             return
         yield it
 
@@ -79,7 +82,8 @@ def read_tags(json_path, include_system=False, name_filter=None):
             if name_filter and not re.search(name_filter, short):
                 continue
             if it.get("datatype") in (None, "", "Unknown"):
-                print(f"Hinweis: Datentyp unbekannt (Array?), uebersprungen: {full}")
+                if not quiet:
+                    print(f"Hinweis: Datentyp unbekannt (Array?), uebersprungen: {full}")
                 continue
             seen.add(full)
             tags.append((full, short, it.get("datatype", "")))
@@ -160,10 +164,7 @@ def mcp_call(tool, port=47823, **args):
 
 def load_usage(device):
     """Verwendung der Variablen live vom MCP-Server (Projekt muss in TIA offen sein)."""
-    status = mcp_call("get_session_status")
-    if not status.get("project_open") and not status.get("auto_reconnect"):
-        mcp_call("connect_portal")
-        mcp_call("attach_project")
+    ensure_connected()
     return mcp_call("list_hmi_tag_usage", device_name=device)
 
 
@@ -385,7 +386,7 @@ INI_NAME = "json2vorlage.ini"
 INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
-                "gruppieren": "ja"},
+                "gruppieren": "ja", "hmi": ""},
     "filter": {"tabellen": "", "namen": "", "datentypen": "", "verknuepfung": "und", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
@@ -412,11 +413,29 @@ def resolve(value, ini_dir):
     return beside if beside.exists() else pth
 
 
+class Abort(Exception):
+    """Fehler bei einer HMI - bei mehreren HMIs wird mit der naechsten weitergemacht."""
+
+
+def ensure_connected():
+    status = mcp_call("get_session_status")
+    if not status.get("project_open") and not status.get("reconnect_on_next_call"):
+        mcp_call("connect_portal")
+        mcp_call("attach_project")
+
+
+def list_unified_hmis():
+    ensure_connected()
+    devs = mcp_call("list_devices")
+    return [sw["item"] for d in devs.get("devices", []) for sw in d.get("software", []) if sw.get("type") == "Unified"]
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Berichtsvorlage aus der Offline-Konfiguration erzeugen. "
+        description="Berichtsvorlagen fuer den WinCC-Unified-Bericht-Control erzeugen. "
                     f"Einstellungen in {INI_NAME} neben dem Skript.")
-    ap.add_argument("json", help="Offline-Konfiguration aus dem Bericht-Control (.json)")
+    ap.add_argument("json", nargs="?", help="optional: Offline-Konfiguration aus dem Bericht-Control (.json); "
+                                            "ohne = Variablen aus dem TIA-Projekt")
     ap.add_argument("--ini", help=f"andere Ini-Datei (Standard: {INI_NAME} neben dem Skript)")
     ap.add_argument("--list", action="store_true", help="Variablen nur anzeigen, keine Datei schreiben")
     ap.add_argument("--tabellen", action="store_true", help="Variablentabellen mit Anzahl Variablen anzeigen")
@@ -430,36 +449,79 @@ def main():
     ini_dir = ini_path.resolve().parent
     print(f"Einstellungen: {ini_path if ini_path.exists() else 'Standardwerte (keine Ini-Datei)'}")
 
+    # Welche HMIs?
+    wanted = [h.strip() for h in re.split(r"[,\n]", v.get("hmi", "")) if h.strip()]
+    if a.json:
+        tags = read_tags(a.json, True, quiet=True)
+        if not tags:
+            sys.exit("Keine Variablen in der JSON gefunden.")
+        json_hmi = tags[0][0].split("::", 1)[0]
+        if wanted and wanted != [json_hmi]:
+            sys.exit(f"hmi = {', '.join(wanted)} passt nicht zur JSON ({json_hmi}).")
+        hmis = [json_hmi]
+    elif wanted:
+        hmis = wanted
+    else:
+        try:
+            hmis = list_unified_hmis()
+            print(f"Unified-HMIs im Projekt: {', '.join(hmis) or '-'}")
+        except McpError as e:
+            pattern = f.get("verwendung_datei", "")
+            if "{hmi}" not in pattern:
+                sys.exit(f"{e}\nOhne JSON und ohne hmi in der Ini werden die HMIs aus dem TIA-Projekt "
+                         "gelesen (MCP-Server) - oder verwendung_datei mit {hmi} angeben.")
+            import glob
+            pre, post = pattern.split("{hmi}", 1)
+            files = glob.glob(str(resolve(pre + "*" + post, ini_dir) or "")) or glob.glob(pre + "*" + post)
+            hmis = sorted({Path(fn).name[len(Path(pre).name):len(Path(fn).name) - len(post)] for fn in files})
+            print(f"MCP-Server nicht erreichbar - HMIs aus vorhandenen Verwendungsdateien: {', '.join(hmis) or '-'}")
+        if not hmis:
+            sys.exit("Keine Unified-HMI gefunden.")
+
+    failed = []
+    for hmi in hmis:
+        if len(hmis) > 1:
+            print(f"\n===== {hmi} =====")
+        try:
+            run_hmi(hmi, a, v, f, ini_dir, multi=len(hmis) > 1)
+        except Abort as e:
+            if len(hmis) == 1:
+                sys.exit(str(e))
+            print(f"FEHLER bei {hmi}: {e}")
+            failed.append(hmi)
+    if failed:
+        sys.exit(f"\nNicht erzeugt: {', '.join(failed)}")
+
+
+def run_hmi(hmi, a, v, f, ini_dir, multi=False):
     tables = ",".join(t.strip() for t in re.split(r"[,\n]", f.get("tabellen", "")) if t.strip())
-    usage_file = resolve(f.get("verwendung_datei"), ini_dir)
-
-    tags = read_tags(a.json, f.getboolean("system_tags"))
-    if not tags:
-        sys.exit("Keine Variablen in der JSON gefunden.")
+    usage_spec = f.get("verwendung_datei", "")
+    usage_file = resolve(usage_spec.replace("{hmi}", hmi), ini_dir) if usage_spec else None
+    if usage_file and multi and "{hmi}" not in usage_spec:
+        raise Abort("Bei mehreren HMIs braucht verwendung_datei den Platzhalter {hmi}.")
     root = lambda short: short.split(".")[0].split("[")[0]
-    device = tags[0][0].split("::", 1)[0]
 
-    # Verwendung (liefert auch Tabelle und Datentyp jeder Variable):
-    # aus verwendung_datei oder live vom MCP-Server (dann ggf. in die Datei speichern).
-    # Pflicht fuer Filter; fuer "nur gruppieren" optional.
-    required = a.tabellen or f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
+    # Verwendung (Variablenliste, Tabellen, Datentypen, Fundstellen): aus verwendung_datei oder live.
+    # Ohne JSON immer noetig; mit JSON nur fuer Filter / Verwendung (fuer "nur gruppieren" optional).
+    required = not a.json or a.tabellen or f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
         or bool(tables) or bool(f.get("datentypen"))
     res = None
     if usage_file and usage_file.exists():
         res = json.loads(usage_file.read_text(encoding="utf-8"))
         print(f"Verwendung aus {usage_file}")
     elif required or v.getboolean("gruppieren"):
-        print(f"Verwendung live vom TIA-MCP-Server ({device}) ...")
+        print(f"Verwendung live vom TIA-MCP-Server ({hmi}) ...")
         try:
-            res = load_usage(device)
+            res = load_usage(hmi)
         except McpError as e:
             if required:
-                sys.exit(f"{e}\nFuer tabellen / datentypen / nur_verwendete wird der MCP-Server mit "
-                         "geoeffnetem Projekt oder eine verwendung_datei gebraucht.")
+                raise Abort(f"{e}\nGebraucht wird der MCP-Server mit geoeffnetem Projekt oder eine verwendung_datei.")
             print(f"Hinweis: {e} - Ausgabe ohne Gruppierung.")
         if res and usage_file:
             usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
             print(f"Verwendung gespeichert: {usage_file}")
+    if res and res.get("device") and res["device"] != hmi:
+        raise Abort(f"Die Verwendung in {usage_file} gehoert zu {res['device']}, nicht zu {hmi}.")
     info = res.get("tags", {}) if res else {}
     tag_table = {n: x.get("table", "") for n, x in info.items()}
     tag_type = {n: x.get("datatype", "") for n, x in info.items()}
@@ -470,6 +532,19 @@ def main():
             print(f"  {tbl:<40} {n} Variablen")
         return
 
+    # Variablenliste: aus der JSON oder aus der Verwendung (Deklarationsreihenfolge)
+    if a.json:
+        tags = read_tags(a.json, f.getboolean("system_tags"))
+    else:
+        if "members" not in res:
+            raise Abort("Die Verwendung enthaelt keine Variablenliste (verwendung_datei von vor dieser Version?) "
+                        "- Datei loeschen, dann wird sie neu abgefragt.")
+        tags = [(f"{hmi}::{m['name']}", m["name"], m["datatype"]) for m in res["members"]]
+        if f.getboolean("system_tags"):
+            tags += [(f"{hmi}::{m['name']}", m["name"], m["datatype"]) for m in res.get("system_members", [])]
+    if not tags:
+        raise Abort("Keine Variablen gefunden.")
+
     # Filter namen / datentypen / tabellen, verknuepft mit UND (alle muessen passen) oder
     # ODER (einer reicht). Ausschluesse mit ! gelten immer. Danach ggf. nur_verwendete.
     mode = (f.get("verknuepfung") or "und").strip().lower()
@@ -477,8 +552,8 @@ def main():
         sys.exit(f"verknuepfung = {mode}: erlaubt sind 'und' oder 'oder'.")
     f_name, f_type, f_table = Filter(f.get("namen")), Filter(f.get("datentypen")), Filter(tables, _table_hit)
     if f_type and not any(tag_type.values()):
-        sys.exit("Die Verwendung enthaelt keine Datentypen (alte verwendung_datei?) - Datei loeschen, "
-                 "dann wird sie neu abgefragt.")
+        raise Abort("Die Verwendung enthaelt keine Datentypen (alte verwendung_datei?) - Datei loeschen, "
+                    "dann wird sie neu abgefragt.")
     active = [(flt, get, label) for flt, get, label in (
         (f_name, lambda t: t[1], "namen"),
         (f_type, lambda t: tag_type.get(root(t[1]), ""), "datentypen"),
@@ -496,8 +571,8 @@ def main():
             f"{label} = {', '.join(flt.incl + ['!' + e for e in flt.excl])}" for flt, _g, label in active)
         print(f"Filter {desc}: {len(tags)} von {before} Eintraegen.")
         if not tags:
-            sys.exit("Kein Eintrag passt auf die Filter (namen / datentypen / tabellen, --tabellen zeigt "
-                     "die Tabellen).")
+            raise Abort("Kein Eintrag passt auf die Filter (namen / datentypen / tabellen, --tabellen zeigt "
+                        "die Tabellen).")
 
     usage_map = None
     if res and (f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet")):
@@ -507,7 +582,7 @@ def main():
             tags = [t for t in tags if usage_map[t[1]]]
             print(f"nur_verwendete: {len(tags)} von {before} Eintraegen werden im HMI verwendet.")
             if not tags:
-                sys.exit("Keine verwendeten Variablen gefunden.")
+                raise Abort("Keine verwendeten Variablen gefunden.")
 
     # Gruppieren nach Tabelle (Reihenfolge wie unter 'tabellen', sonst alphabetisch)
     groups = None
@@ -536,12 +611,17 @@ def main():
         beside = Path(__file__).resolve().parent / "basis_vorlage.xlsx"
         base = beside if beside.exists() else Path("test.xlsx")
     if not base.exists():
-        sys.exit(f"Basis-Datei nicht gefunden: {base} (in der Ini unter basis eintragen)")
-    heartbeat = find_heartbeat(a.json) if v.getboolean("erstellt_am") else None
-    if v.getboolean("erstellt_am") and not heartbeat:
-        print("Hinweis: @Heartbeat nicht in der JSON - Zeile 'Erstellt am:' entfaellt.")
-    out = Path(v.get("ausgabe") or "Vorlage_Variablen.xlsx")
-    build(tags, str(base), str(out), v.get("blatt"), v.get("titel"), v.getint("erste_zeile"),
+        raise Abort(f"Basis-Datei nicht gefunden: {base} (in der Ini unter basis eintragen)")
+    heartbeat = None
+    if v.getboolean("erstellt_am"):
+        heartbeat = find_heartbeat(a.json) if a.json else f"{hmi}::@Heartbeat"
+        if not heartbeat:
+            print("Hinweis: @Heartbeat nicht in der JSON - Zeile 'Erstellt am:' entfaellt.")
+    out_spec = v.get("ausgabe") or "Vorlage_Variablen.xlsx"
+    if multi and "{hmi}" not in out_spec:
+        out_spec = str(Path(out_spec).with_name(f"{Path(out_spec).stem}_{{hmi}}{Path(out_spec).suffix}"))
+    out = Path(out_spec.replace("{hmi}", hmi))
+    build(tags, str(base), str(out), v.get("blatt"), v.get("titel").replace("{hmi}", hmi), v.getint("erste_zeile"),
           heartbeat, v.getboolean("qualitaet"), usage_map if f.getboolean("spalte_verwendet") else None,
           groups)
     print(f"\nBasis: {base}\nVorlage geschrieben: {out.resolve()}")

@@ -463,14 +463,17 @@ Alle Fehler folgen diesem Schema:
 Erzeugt eine Excel-Berichtsvorlage für den WinCC-Unified-Bericht-Control aus der Offline-Konfiguration (`.json`, Export im Bericht-Control). Jede Variable steht untereinander als Einzelwert (Spalte A Name, Spalte B Wert). UDTs und Arrays werden in ihre Elemente aufgelöst (`Motor1.Temperatur.Wert`, `Messwerte[3]`). Reines Python, keine Zusatzpakete.
 
 ```powershell
-python tools\json2vorlage.py anlage.json
+python tools\json2vorlage.py              # Variablen direkt aus dem TIA-Projekt
+python tools\json2vorlage.py anlage.json  # oder aus der Offline-Konfiguration
 ```
+
+Ohne JSON kommen Variablen (inkl. UDT-Elemente in Deklarationsreihenfolge), Datentypen, Tabellen und Verwendung über `list_hmi_tag_usage` aus dem TIA-Projekt — live oder aus `verwendung_datei`. Ist `hmi` in der Ini leer, entsteht je Unified-HMI eine Vorlage (`{hmi}` in `ausgabe`, `titel`, `verwendung_datei`).
 
 Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Namen (`namen`: Textteile, Muster mit `*`, Ausschluss mit `!`), nach Datentyp (`datentypen`, z. B. `UDT_Motor`) und nach Variablentabellen (`tabellen`) — verknüpft mit `verknuepfung = und` (alle müssen passen) oder `oder` (einer reicht), Ausschlüsse mit `!` gelten immer — nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823; mit `verwendung_datei` einmal abfragen und später ohne TIA wiederverwenden), Spalte „Verwendet in“ und **Gruppierung nach Variablentabellen** (`gruppieren`: graue Überschriftzeile je Tabelle, Reihenfolge wie unter `tabellen`).
 
 | Aufruf | Wirkung |
 |---|---|
-| `json2vorlage.py anlage.json` | Vorlage nach den Einstellungen der Ini erzeugen |
+| `json2vorlage.py` / `json2vorlage.py anlage.json` | Vorlage(n) nach den Einstellungen der Ini erzeugen |
 | `… --list` | Variablen nur anzeigen |
 | `… --tabellen` | Variablentabellen mit Anzahl Variablen anzeigen |
 | `… --ini linie2.ini` | andere Ini-Datei verwenden (z. B. eine pro Anlage) |
@@ -485,6 +488,7 @@ Getestet mit WinCC Unified PC RT V21 (Vorlagenformat 5.0.0.0): Werte, UDT-Elemen
 
 | Version | Datum | Änderungen |
 |---|---|---|
+| 1.17.0 | 2026-10-04 | `list_hmi_tag_usage` liefert zusätzlich `members` (aufgelöste Variablen: UDT-Elemente, Array-Einträge, Deklarationsreihenfolge, Runtime-Datentyp wie in der Offline-Konfiguration) und `system_members`. `tools/json2vorlage.py` braucht damit keine JSON mehr; ohne `hmi` in der Ini je Unified-HMI eine Vorlage. |
 | 1.16.0 | 2026-10-03 | `list_hmi_tag_usage` — wo werden HMI-Variablen verwendet (Unified): Bilder mit Tag-/Skript-Dynamisierungen, Ereignissen und Eigenschafts-Ereignissen, Bit-/Analogalarme, Archivierung, globale Skriptmodule. Ergebnis: `usages` (Referenz → Fundstellen), `tags` (je Variable `table`/`datatype`/`used`/`where`), `unused`. Skripte werden per Textsuche ausgewertet (`Tags("Name")`, passende String-Literale); dynamisch zusammengesetzte Namen werden nicht erkannt. |
 | 1.15.0 | 2026-10-04 | **TIA-Openness läuft in einem eigenen Worker-Prozess (`worker.py`).** Trennen, Leerlauf und Timeout beenden den Worker — nur das gibt TIA zuverlässig frei (vorher hing TIA beim Schließen des Projekts, obwohl die Verbindung per `Dispose` getrennt war, bis der Server-Prozess endete). Der nächste Aufruf startet einen neuen Worker und verbindet automatisch neu. Weitere Hänger behoben: STA-Thread pumpt Window-Messages; Leerlauf-Trennung mit automatischem Neuverbinden; alte Verbindungen werden per `Dispose` freigegeben (`connect_portal`, Timeout); nach Timeout kein zweiter STA-Thread mehr; TIA-Rückfragen werden abgebrochen statt zu blockieren. `connect_portal` wählt bei mehreren TIA-Instanzen den richtigen Prozess, `close_portal` beendet nur noch den eigenen. Dialog-Handler werden vor `Dispose` abgemeldet (sonst hing TIA beim Schließen des Projekts, bis der Server-Prozess endete). Neu: `disconnect_portal`. Fix: `create_project` (NameError) und `open_portal` (fehlte in tia.py). Sandbox: `Exception`, `secure_string`, `dir_info`, `file_info`; `CurrentDomain`/`GetAssemblies` gesperrt. |
 | 1.14.1 | 2026-09-26 | `set_plc_block_source` neu über externe Quelle statt selbst gebautem Token-XML (Fehler *"The token is not supported"* bei jedem echten SCL-Code); ganzer Baustein oder Rumpf; anschließendes Übersetzen mit Fehlertexten. `get_plc_block_source` liefert lesbares SCL via `GenerateSource`. `compile_plc` liefert die eigentlichen Fehlermeldungen (vorher leer). |

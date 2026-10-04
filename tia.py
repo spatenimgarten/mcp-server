@@ -6,13 +6,16 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.16.0"
+VERSION      = "1.17.0"
 VERSION_DATE = "2026-10-03"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.17.0: list_hmi_tag_usage liefert zusaetzlich members (aufgeloeste Variablen mit UDT-Elementen und "
+        "Array-Eintraegen in Deklarationsreihenfolge, Runtime-Datentyp) und system_members — damit braucht "
+        "tools/json2vorlage.py keine Offline-Konfiguration mehr.",
         "1.16.0: list_hmi_tag_usage — Verwendung der HMI-Variablen (Unified): Bilder (Tag-/Skript-"
         "Dynamisierungen, Ereignisse, Eigenschafts-Ereignisse), Bit-/Analogalarme, Archivierung, globale "
         "Skriptmodule; liefert usages, tags (table/datatype/used/where) und unused.",
@@ -1602,6 +1605,19 @@ _TAG_CALL_RE = re.compile(r"""Tags\s*\(\s*(["'`])(.+?)\1""")
 _STR_LIT_RE  = re.compile(r"""(["'`])([^"'`\r\n]{1,200})\1""")
 _ALARM_TAG_ATTRS = ("RaisedStateTag", "AcknowledgmentStateTag", "AcknowledgmentControlTag", "TriggerTag")
 
+# TIA-Datentyp -> Datentyp-Name der Unified-Runtime (wie in der Offline-Konfiguration des
+# Bericht-Controls). Geprueft gegen eine Offline-Konfiguration: Bool, Int, DInt, UDInt, ULInt,
+# Real, String, WString, Time, LTime, DateTime, Date_And_Time. Uebrige nach Namensregel.
+_RUNTIME_TYPES = {
+    "Int": "Int16", "DInt": "Int32", "LInt": "Int64", "SInt": "SByte",
+    "UInt": "UInt16", "UDInt": "UInt32", "ULInt": "UInt64", "USInt": "Byte",
+    "WString": "String", "Date_And_Time": "DateTime", "DTL": "DateTime", "LDT": "DateTime",
+    "LTime": "Time", "LReal": "Double",
+}
+
+def _runtime_type(tia_type):
+    return _RUNTIME_TYPES.get(tia_type, tia_type)
+
 def _tag_root(ref):
     """'HMI_RT_1::Motor1.Temperatur.Wert' / 'Messwerte[2]' -> 'Motor1' / 'Messwerte'"""
     ref = ref.split("::", 1)[-1]
@@ -1766,9 +1782,34 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
         if unknown:
             notes.append("Referenzen ohne passende HMI-Variable (Systemvariablen, Tippfehler "
                          "oder dynamische Namen): " + ", ".join(unknown[:20]))
+        # Aufgeloeste Variablenliste (UDT-Elemente, Array-Eintraege) in Deklarationsreihenfolge,
+        # mit Runtime-Datentyp - damit braucht json2vorlage keine Offline-Konfiguration mehr
+        members = []
+        for tbl in _hmi_tag_tables(sw):
+            for t in tbl.Tags:
+                stack = [(str(t.Name), t)]
+                while stack:
+                    name, obj = stack.pop(0)
+                    try:
+                        kids = list(obj.Members or [])
+                    except Exception:
+                        kids = []
+                    if kids:
+                        stack = [(name + (str(m.Name) if str(m.Name).startswith("[") else "." + str(m.Name)), m)
+                                 for m in kids] + stack
+                        continue
+                    tia_type = str(getattr(obj, "DataType", "") or "")
+                    members.append({"name": name, "datatype": _runtime_type(tia_type), "tia_type": tia_type,
+                                    "root": str(t.Name), "table": str(tbl.Name)})
+        system_members = []
+        for t in getattr(sw, "SystemTags", None) or []:
+            tia_type = str(t.DataType)
+            system_members.append({"name": str(t.Name), "datatype": _runtime_type(tia_type), "tia_type": tia_type})
+
         return {"status": "ok", "device": device_name, "stats": stats,
                 "usages": dict(sorted(usages.items())), "tags": tags,
                 "unused": [n for n, v in tags.items() if not v["used"]],
+                "members": members, "system_members": system_members,
                 "notes": notes}
     return sta.run(_tia_call, _run, timeout=_STA_TIMEOUT_HEAVY)
 

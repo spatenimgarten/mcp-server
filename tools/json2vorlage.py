@@ -487,6 +487,18 @@ def ensure_connected():
         mcp_call("attach_project")
 
 
+def current_project():
+    """Name des in TIA offenen Projekts - nur wenn der MCP-Server schon laeuft und verbunden ist
+    (startet nichts und verbindet nicht neu). Sonst None."""
+    try:
+        status = _rpc("get_session_status", MCP_PORT, {})
+    except Exception:
+        return None
+    if status.get("ok"):
+        return (status.get("result") or {}).get("project_name") or None
+    return None
+
+
 def list_unified_hmis():
     ensure_connected()
     devs = mcp_call("list_devices")
@@ -586,7 +598,14 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
     res = None
     if usage_file and usage_file.exists():
         res = json.loads(usage_file.read_text(encoding="utf-8"))
-        print(f"Verwendung aus {usage_file}")
+        if not res.get("project"):
+            raise Abort(f"{usage_file} enthaelt keine Projektangabe (von vor dieser Version, evtl. aus einem "
+                        "anderen Projekt) - Datei loeschen, dann wird sie neu abgefragt.")
+        print(f"Verwendung aus {usage_file} (Projekt {res['project']}, abgefragt {res.get('saved', '?')})")
+        live = current_project()
+        if live and live != res["project"]:
+            raise Abort(f"{usage_file} gehoert zum Projekt {res['project']}, in TIA ist aber {live} offen. "
+                        "Datei loeschen (wird neu abgefragt) oder das passende Projekt oeffnen.")
     elif required or v.getboolean("gruppieren"):
         print(f"Verwendung live vom TIA-MCP-Server ({hmi}) ... "
               "(Fortschritt: C:\\tia-mcp\\logs\\tia_mcp.log)")
@@ -597,6 +616,10 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
                 raise Abort(f"{e}\nGebraucht wird der MCP-Server mit geoeffnetem Projekt oder eine verwendung_datei.")
             print(f"Hinweis: {e} - Ausgabe ohne Gruppierung.")
         if res and usage_file:
+            import datetime
+            res["saved"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+            if not res.get("project"):
+                res["project"] = current_project() or ""
             usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
             print(f"Verwendung gespeichert: {usage_file}")
     if res and res.get("device") and res["device"] != hmi:

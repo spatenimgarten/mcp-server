@@ -480,6 +480,10 @@ Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, 
 
 Tabellen, Datentypen und Verwendung kommen über `list_hmi_tag_usage` aus dem TIA-Projekt (live oder aus `verwendung_datei`); ein Variablen-Export aus TIA ist nicht nötig. Läuft der MCP-Server nicht (keine Claude-Sitzung), startet das Skript ihn selbst im Hintergrund und beendet ihn am Ende wieder (`[server] autostart = ja`, `mcp_server = C:\tia-mcp\mcp-server`). Die Basis-Mappe legt man einmal mit dem Excel-Add-in an: leere Mappe, ein Einzelwert-Segment, speichern. Relative Pfade in der Ini werden zuerst im aktuellen Ordner, dann neben der Ini gesucht.
 
+**Runtime-Prüfung (`[runtime] pruefen = ja`):** WinCC Unified lädt von Strukturvariablen (UDTs) nur die im HMI verwendeten Elemente (spart PowerTags). Hängt ein UDT als Ganzes an einem Faceplate, ist offline nicht erkennbar, welche Elemente geladen werden; nicht geladene Elemente liefern im Bericht `null` („Only leaf elements of a Structure Tag can be addressed“), und die Berichtserzeugung bricht mit „Uncaught exception“ ab. Mit `pruefen = ja` fragt das Skript die laufende Runtime per GraphQL (`url`, Benutzer/Passwort werden abgefragt, das Passwort nie gespeichert) und lässt solche Elemente weg. Das Ergebnis landet in `runtime_{hmi}.txt` und wird genommen, wenn die Runtime nicht läuft. Vor der Verwendungsabfrage prüft das Skript mit Stichproben, ob die laufende Runtime zum HMI gehört; ist das nicht so und fehlt die Datei, wird das HMI übersprungen. Neu prüfen nach Änderungen im HMI: Datei löschen oder bei laufender Runtime starten.
+
+`verwendung_datei` enthält das Projekt; passt es nicht zum in TIA geöffneten Projekt, bricht das Skript ab.
+
 Getestet mit WinCC Unified PC RT V21 (Vorlagenformat 5.0.0.0): Werte, UDT-Elemente, verschachtelte UDTs, Arrays, DateTime, Time/LTime (kommen als Text), Qualität (`GOOD`/`UNCERTAIN`/`BAD` mit Code) und Erstellungszeitpunkt (Zeitstempel von `@Heartbeat`).
 
 ---

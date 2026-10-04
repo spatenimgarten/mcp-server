@@ -99,7 +99,8 @@ _IDLE_KILL_S   = float(os.environ.get("TIA_MCP_IDLE_DISCONNECT", "120"))
 # wenn der Worker in einem TIA-Aufruf blockiert). Lange Operationen bekommen mehr Zeit.
 _WORKER_TIMEOUT_S = float(os.environ.get("TIA_MCP_WORKER_TIMEOUT", "300"))
 _WORKER_TIMEOUT_LONG_S = float(os.environ.get("TIA_MCP_WORKER_TIMEOUT_LONG", "900"))
-_LONG_TOOLS = {"open_project", "create_project", "compile_plc", "close_portal", "save_project"}
+_LONG_TOOLS = {"open_project", "create_project", "compile_plc", "close_portal", "save_project",
+               "list_hmi_tag_usage"}   # grosse Projekte: mehrere Minuten (gemessen 218 s)
 
 
 class _Worker:

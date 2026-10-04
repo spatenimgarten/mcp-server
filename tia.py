@@ -13,7 +13,9 @@ VERSION_INFO = {
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
-        "1.17.2: list_hmi_tag_usage protokolliert den Fortschritt (Bild i/n, Alarme, Archiv, Skripte, "
+        "1.17.2: list_hmi_tag_usage wertet Faceplate-Schnittstellen (Interface PropertyName/Value) und "
+        "Unterteile von Bildobjekten aus (Trendbereiche/Kurven DataSourceY 'Variable:LoggingTag', Grenzwerte); "
+        "protokolliert den Fortschritt (Bild i/n, Alarme, Archiv, Skripte, "
         "Variablen) ins Log; Worker-Timeout einstellbar (TIA_MCP_WORKER_TIMEOUT, Standard 300 s, lange "
         "Operationen 900 s).",
         "1.17.1: Variablentabellen in Ordnern (TagTableGroups, rekursiv) werden gelesen — list_hmi_tags, list_hmi_tag_usage und der Tabellen-Export uebersahen sie bisher.",
@@ -1487,10 +1489,14 @@ def _hmi_screens(sw):
         for grp in collection:
             for s in grp.Screens:
                 screens.append(s)
-            sub = getattr(grp, "ScreenGroups", None) or getattr(grp, "Folders", None)
-            if sub:
-                try: _collect_from_groups(sub)
-                except Exception: pass
+            # Unterordner: Unified "Groups" (vorher fehlten Bilder ab der zweiten Ordnerebene),
+            # aeltere APIs "ScreenGroups" / "Folders"
+            for attr in ("Groups", "ScreenGroups", "Folders"):
+                sub = getattr(grp, attr, None)
+                if sub is not None:
+                    try: _collect_from_groups(sub)
+                    except Exception: pass
+                    break
 
     def _collect_from_folder(folder):
         for s in folder.Screens:
@@ -1745,6 +1751,69 @@ def list_hmi_tag_usage(device_name, include_scripts=True, include_system=False):
                     elif isinstance(v, str) and _tag_root(v) in known:
                         add(v, w)
 
+        # Faceplate-Schnittstellen und Unterteile (Trendbereiche, Kurven, Datenquellen, Grenzwerte).
+        # Nur Eigenschaften, deren Typ ein Part / eine Part-Sammlung / eine Schnittstelle ist -
+        # so bleibt es auch bei vielen Objekten schnell (Typ-Info pro .NET-Typ zwischengespeichert).
+        part_props = {}
+
+        def part_properties(obj):
+            tname = str(obj.GetType().FullName)
+            if tname not in part_props:
+                sel = []
+                for prop in obj.GetType().GetProperties():
+                    pn, ptn = str(prop.Name), str(prop.PropertyType.Name)
+                    if pn in ("Parent", "Dynamizations", "EventHandlers", "PropertyEventHandlers"):
+                        continue
+                    if ptn.endswith("Part") or ptn.endswith("Composition") or pn == "Interface":
+                        sel.append(prop)
+                    elif pn in ("Source", "Value", "Tag", "ProcessValue") and ptn == "String":
+                        sel.append(prop)
+                part_props[tname] = sel
+            return part_props[tname]
+
+        def check_ref(value, where):
+            if not isinstance(value, str) or not value:
+                return
+            ref = value.split("::", 1)[-1]
+            if ":" in ref:                       # Trend-Datenquelle "Variable:LoggingTag"
+                ref = ref.split(":", 1)[0]
+            if _tag_root(ref) in known:
+                add(ref, where)
+
+        def scan_parts(obj, where, depth=0):
+            if obj is None or depth > 5:
+                return
+            for prop in part_properties(obj):
+                try:
+                    val = prop.GetValue(obj, None)
+                except Exception:
+                    continue
+                if val is None:
+                    continue
+                pn = str(prop.Name)
+                if isinstance(val, str):
+                    check_ref(val, f"{where} ({pn})")
+                    continue
+                vtn = str(val.GetType().Name)
+                if vtn.endswith("Composition") or pn == "Interface":
+                    try:
+                        items = list(val)
+                    except Exception:
+                        continue
+                    for k, part in enumerate(items):
+                        label = str(getattr(part, "PropertyName", "") or f"{pn}[{k}]")
+                        w = f"{where} / {label}"
+                        if pn == "Interface":
+                            check_ref(str(getattr(part, "Value", "") or ""), w)
+                        scan_dynamizations(part, w)
+                        scan_handlers(part, w)
+                        scan_parts(part, w, depth + 1)
+                else:
+                    w = f"{where} / {pn}"
+                    scan_dynamizations(val, w)
+                    scan_handlers(val, w)
+                    scan_parts(val, w, depth + 1)
+
         # Fortschritt ins Log, damit man bei grossen Projekten sieht, wo es haengt
         import time as _time
         t_start = _time.monotonic()
@@ -1766,6 +1835,11 @@ def list_hmi_tag_usage(device_name, include_scripts=True, include_system=False):
                 where = f"{sname} / {it.Name}"
                 scan_dynamizations(it, where)
                 scan_handlers(it, where)
+                try:
+                    ctype = str(getattr(it, "ContainedType", "") or "")
+                except Exception:
+                    ctype = ""
+                scan_parts(it, f"{where} [{ctype}]" if ctype else where)
             if _time.monotonic() - t_scr > 10:
                 phase(f"  Bild {scr.Name} dauerte {_time.monotonic() - t_scr:.0f}s")
         phase(f"Bilder fertig: {stats['screens']} Bilder, {stats['screen_items']} Objekte")

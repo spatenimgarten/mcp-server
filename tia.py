@@ -6,13 +6,16 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.17.1"
+VERSION      = "1.17.2"
 VERSION_DATE = "2026-10-03"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.17.2: list_hmi_tag_usage protokolliert den Fortschritt (Bild i/n, Alarme, Archiv, Skripte, "
+        "Variablen) ins Log; Worker-Timeout einstellbar (TIA_MCP_WORKER_TIMEOUT, Standard 300 s, lange "
+        "Operationen 900 s).",
         "1.17.1: Variablentabellen in Ordnern (TagTableGroups, rekursiv) werden gelesen — list_hmi_tags, list_hmi_tag_usage und der Tabellen-Export uebersahen sie bisher.",
         "1.17.0: list_hmi_tag_usage liefert zusaetzlich members (aufgeloeste Variablen mit UDT-Elementen und "
         "Array-Eintraegen in Deklarationsreihenfolge, Runtime-Datentyp) und system_members — damit braucht "
@@ -1742,10 +1745,20 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                     elif isinstance(v, str) and _tag_root(v) in known:
                         add(v, w)
 
+        # Fortschritt ins Log, damit man bei grossen Projekten sieht, wo es haengt
+        import time as _time
+        t_start = _time.monotonic()
+        def phase(text):
+            log.info(f"[{device_name}] {text} ({_time.monotonic() - t_start:.0f}s)")
+        phase(f"Verwendung: {len(known)} Variablen in {len(_hmi_all_tag_tables(sw))} Tabellen")
+
         # Bilder
-        for scr in _hmi_screens(sw):
+        screens = _hmi_screens(sw)
+        for i, scr in enumerate(screens, 1):
             stats["screens"] += 1
             sname = f"Bild {scr.Name}"
+            t_scr = _time.monotonic()
+            phase(f"Bild {i}/{len(screens)}: {scr.Name}")
             scan_dynamizations(scr, sname)
             scan_handlers(scr, sname)
             for it in scr.ScreenItems:
@@ -1753,6 +1766,9 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                 where = f"{sname} / {it.Name}"
                 scan_dynamizations(it, where)
                 scan_handlers(it, where)
+            if _time.monotonic() - t_scr > 10:
+                phase(f"  Bild {scr.Name} dauerte {_time.monotonic() - t_scr:.0f}s")
+        phase(f"Bilder fertig: {stats['screens']} Bilder, {stats['screen_items']} Objekte")
 
         # Alarme
         for coll_name, kind in (("DiscreteAlarms", "Bitalarm"), ("AnalogAlarms", "Analogalarm")):
@@ -1770,6 +1786,8 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                 except Exception:
                     pass
 
+        phase(f"Alarme fertig: {stats['alarms']}")
+
         # Archivierung
         for tbl in _hmi_all_tag_tables(sw):
             for t in tbl.Tags:
@@ -1779,8 +1797,13 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                 except Exception:
                     pass
 
+        phase("Archivierung fertig")
+
         # Globale Skriptmodule: Export in Temp-Ordner, dann Textsuche
+        if not include_scripts:
+            notes.append("Globale Skriptmodule nicht ausgewertet (include_scripts = false).")
         if include_scripts and getattr(sw, "Scripts", None) is not None:
+            phase("Globale Skriptmodule exportieren ...")
             import tempfile, shutil
             from System.IO import DirectoryInfo
             tmp = Path(tempfile.mkdtemp(prefix="tia_scripts_"))
@@ -1797,6 +1820,8 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                 notes.append(f"Globale Skripte nicht ausgewertet: {e}")
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
+
+            phase("Globale Skriptmodule fertig")
 
         used_roots = {}
         for ref, where in usages.items():
@@ -1827,6 +1852,7 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                     tia_type = str(getattr(obj, "DataType", "") or "")
                     members.append({"name": name, "datatype": _runtime_type(tia_type), "tia_type": tia_type,
                                     "root": str(t.Name), "table": str(tbl.Name)})
+        phase(f"Variablen aufgeloest: {len(members)} Eintraege")
         system_members = []
         for t in getattr(sw, "SystemTags", None) or []:
             tia_type = str(t.DataType)

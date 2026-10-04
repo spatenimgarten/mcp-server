@@ -17,7 +17,7 @@ import base64
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.17.1"
+VERSION      = "1.17.2"
 VERSION_DATE = "2026-10-03"
 
 # ── Primär / Proxy Architektur ─────────────────────────────────────────────────
@@ -95,7 +95,11 @@ async def _rpc_call(name: str, args: dict):
 
 _LOCAL_TOOLS   = {"get_version", "restart_server"}
 _IDLE_KILL_S   = float(os.environ.get("TIA_MCP_IDLE_DISCONNECT", "120"))
-_WORKER_TIMEOUT_S = 600     # letzte Notbremse; tia.py bricht haengende Aufrufe nach 60/300 s selbst ab
+# Letzte Notbremse, falls ein Aufruf im Worker haengt (die Zeitgrenzen in tia.py greifen nicht,
+# wenn der Worker in einem TIA-Aufruf blockiert). Lange Operationen bekommen mehr Zeit.
+_WORKER_TIMEOUT_S = float(os.environ.get("TIA_MCP_WORKER_TIMEOUT", "300"))
+_WORKER_TIMEOUT_LONG_S = float(os.environ.get("TIA_MCP_WORKER_TIMEOUT_LONG", "900"))
+_LONG_TOOLS = {"open_project", "create_project", "compile_plc", "close_portal", "save_project"}
 
 
 class _Worker:
@@ -184,7 +188,8 @@ class _Worker:
                     self._send("connect_portal", {}, 120)
                     if self.attached and name not in ("attach_project", "open_project", "create_project"):
                         self._send("attach_project", {}, 120)
-                result = self._send(name, args, _WORKER_TIMEOUT_S)
+                result = self._send(name, args,
+                                    _WORKER_TIMEOUT_LONG_S if name in _LONG_TOOLS else _WORKER_TIMEOUT_S)
             finally:
                 # Statusabfragen zaehlen nicht als Aktivitaet - sonst haelt ein Skript, das
                 # regelmaessig den Status prueft, den Worker (und damit TIA) dauerhaft fest

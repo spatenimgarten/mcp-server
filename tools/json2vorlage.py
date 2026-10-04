@@ -223,10 +223,10 @@ def _rpc(tool, port, args):
 
 
 
-def load_usage(device):
+def load_usage(device, include_scripts=True):
     """Verwendung der Variablen live vom MCP-Server (Projekt muss in TIA offen sein)."""
     ensure_connected()
-    return mcp_call("list_hmi_tag_usage", device_name=device)
+    return mcp_call("list_hmi_tag_usage", device_name=device, include_scripts=include_scripts)
 
 
 def usage_for(short, usages):
@@ -450,7 +450,8 @@ INI_DEFAULTS = {
                 "gruppieren": "ja", "hmi": ""},
     "server": {"mcp_server": r"C:\tia-mcp\mcp-server", "autostart": "ja"},
     "filter": {"tabellen": "", "namen": "", "datentypen": "", "verknuepfung": "und", "system_tags": "nein",
-               "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
+               "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": "",
+               "skripte_auswerten": "ja"},
 }
 
 
@@ -580,9 +581,10 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
         res = json.loads(usage_file.read_text(encoding="utf-8"))
         print(f"Verwendung aus {usage_file}")
     elif required or v.getboolean("gruppieren"):
-        print(f"Verwendung live vom TIA-MCP-Server ({hmi}) ...")
+        print(f"Verwendung live vom TIA-MCP-Server ({hmi}) ... "
+              "(Fortschritt: C:\\tia-mcp\\logs\\tia_mcp.log)")
         try:
-            res = load_usage(hmi)
+            res = load_usage(hmi, f.getboolean("skripte_auswerten"))
         except McpError as e:
             if required:
                 raise Abort(f"{e}\nGebraucht wird der MCP-Server mit geoeffnetem Projekt oder eine verwendung_datei.")

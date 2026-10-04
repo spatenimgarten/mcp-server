@@ -49,7 +49,7 @@ commit.bat "v1.x.y: kurze Beschreibung der Änderung"
 
 ---
 
-## Architektur: Primär / Proxy
+## Architektur: Primär / Proxy / Worker
 
 Ab v1.4.0 können mehrere Claude-Sessions gleichzeitig auf denselben TIA Portal MCP Server zugreifen:
 
@@ -59,6 +59,15 @@ Ab v1.4.0 können mehrere Claude-Sessions gleichzeitig auf denselben TIA Portal 
 COM-Zugriffe bleiben single-threaded und werden durch einen internen Lock serialisiert. Wird die primäre Instanz beendet, übernimmt beim nächsten Start automatisch die nächste Instanz die Rolle des Primärs.
 
 ---
+
+
+**Worker-Prozess (ab 1.15.0):** Die primäre Instanz lädt die TIA-Bibliotheken nicht selbst. Alle TIA-Aufrufe laufen in `worker.py`, einem Kindprozess, der Aufträge als JSON-Zeilen über stdin/stdout erhält. Die primäre Instanz beendet den Worker
+
+- bei `disconnect_portal` und `close_portal`,
+- nach `TIA_MCP_IDLE_DISCONNECT` Sekunden ohne Aufruf (Standard 120, `0` = aus),
+- wenn ein Aufruf nicht antwortet (dann notfalls den ganzen Prozessbaum).
+
+Grund: Nach dem ersten Openness-Zugriff bleibt im Prozess etwas bei TIA angemeldet, das weder `Dispose` noch das Abmelden der Event-Handler löst; TIA hing dann beim Schließen des Projekts, bis der Prozess endete. Der nächste Aufruf startet einen neuen Worker und wiederholt `connect_portal`/`attach_project`, wenn vorher verbunden war. `get_session_status` zeigt `worker: laeuft/beendet`; solange kein Worker läuft, antwortet der Server selbst (ohne die TIA-Bibliotheken zu laden).
 
 ## Versionsabfrage
 
@@ -451,7 +460,7 @@ Alle Fehler folgen diesem Schema:
 
 | Version | Datum | Änderungen |
 |---|---|---|
-| 1.15.0 | 2026-10-03 | TIA-Hänger behoben: STA-Thread pumpt Window-Messages; Leerlauf-Trennung mit automatischem Neuverbinden; alte Verbindungen werden per `Dispose` freigegeben (`connect_portal`, Timeout); nach Timeout kein zweiter STA-Thread mehr; TIA-Rückfragen werden abgebrochen statt zu blockieren. `connect_portal` wählt bei mehreren TIA-Instanzen den richtigen Prozess, `close_portal` beendet nur noch den eigenen. Dialog-Handler werden vor `Dispose` abgemeldet (sonst hing TIA beim Schließen des Projekts, bis der Server-Prozess endete). Neu: `disconnect_portal`. Fix: `create_project` (NameError) und `open_portal` (fehlte in tia.py). Sandbox: `Exception`, `secure_string`, `dir_info`, `file_info`; `CurrentDomain`/`GetAssemblies` gesperrt. |
+| 1.15.0 | 2026-10-04 | **TIA-Openness läuft in einem eigenen Worker-Prozess (`worker.py`).** Trennen, Leerlauf und Timeout beenden den Worker — nur das gibt TIA zuverlässig frei (vorher hing TIA beim Schließen des Projekts, obwohl die Verbindung per `Dispose` getrennt war, bis der Server-Prozess endete). Der nächste Aufruf startet einen neuen Worker und verbindet automatisch neu. Weitere Hänger behoben: STA-Thread pumpt Window-Messages; Leerlauf-Trennung mit automatischem Neuverbinden; alte Verbindungen werden per `Dispose` freigegeben (`connect_portal`, Timeout); nach Timeout kein zweiter STA-Thread mehr; TIA-Rückfragen werden abgebrochen statt zu blockieren. `connect_portal` wählt bei mehreren TIA-Instanzen den richtigen Prozess, `close_portal` beendet nur noch den eigenen. Dialog-Handler werden vor `Dispose` abgemeldet (sonst hing TIA beim Schließen des Projekts, bis der Server-Prozess endete). Neu: `disconnect_portal`. Fix: `create_project` (NameError) und `open_portal` (fehlte in tia.py). Sandbox: `Exception`, `secure_string`, `dir_info`, `file_info`; `CurrentDomain`/`GetAssemblies` gesperrt. |
 | 1.14.1 | 2026-09-26 | `set_plc_block_source` neu über externe Quelle statt selbst gebautem Token-XML (Fehler *"The token is not supported"* bei jedem echten SCL-Code); ganzer Baustein oder Rumpf; anschließendes Übersetzen mit Fehlertexten. `get_plc_block_source` liefert lesbares SCL via `GenerateSource`. `compile_plc` liefert die eigentlichen Fehlermeldungen (vorher leer). |
 | 1.14.0 | 2026-09-26 | `get_online_state`, `go_online`, `go_offline` — SPS online/offline via `OnlineProvider` inkl. `OnlineLegitimation`-Handler (anonym / Benutzer / Passwort / TLS-Zertifikat). `server.py` und `tia.py` wieder auf gleicher Version. `SyntaxWarning` im `server.py`-Docstring behoben. |
 | 1.13.1–1.13.4 | 2026-06-17 | STA-Loop / recoverable TiaErrors nur noch DEBUG-Log; `_get_hmi` akzeptiert device.Name und item.Name |

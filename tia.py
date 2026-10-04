@@ -13,7 +13,11 @@ VERSION_INFO = {
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
-        "1.15.0: TIA-Haenger behoben — STA-Thread pumpt Window-Messages; Openness-Verbindung wird nach "
+        "1.15.0: TIA-Openness laeuft in eigenem Worker-Prozess (worker.py); Trennen, Leerlauf "
+        "(TIA_MCP_IDLE_DISCONNECT, Standard 120 s) und Timeout beenden den Worker — nur das gibt TIA "
+        "zuverlaessig frei (vorher hing TIA beim Projekt-Schliessen trotz Dispose). Naechster Aufruf "
+        "startet neuen Worker und verbindet automatisch neu. Ausserdem: "
+        "STA-Thread pumpt Window-Messages; Openness-Verbindung wird nach "
         "Leerlauf getrennt (TIA_MCP_IDLE_DISCONNECT, Standard 120 s) und beim naechsten Aufruf automatisch "
         "neu aufgebaut; alte Verbindungen werden per Dispose freigegeben (connect_portal, Timeout); nach "
         "Timeout kein zweiter STA-Thread mehr; TIA-Rueckfragen werden abgebrochen statt zu blockieren "

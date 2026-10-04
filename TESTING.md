@@ -56,6 +56,8 @@
 | 2b.5 | Mehrere TIA-Instanzen offen, `connect_portal` | Prozess mit dem gemerkten bzw. einzigen offenen Projekt wird gewählt; `tia_processes` in der Antwort | ⬜ | |
 | 2b.6 | `create_project` | Projekt wird angelegt (vorher NameError `portal`) | ⬜ | |
 | 2b.7 | `execute_openness` mit `secure_string('x')`, `dir_info('C:/')` | Kein Absturz des Servers | ⬜ | |
+| 2b.9 | Worker: verbinden, `list_hmi_tags`, `disconnect_portal`, dann Projekt in TIA schließen | Worker-Prozess beendet, **kein Hänger** beim Schließen | ✅ | 2026-10-04: vorher (nur Dispose + Handler abmelden) hing TIA zweimal, bis der Server-Prozess beendet wurde |
+| 2b.10 | Worker offline: lokaler Status ohne Worker, Fehler durchreichen, Leerlauf beendet Worker, Neustart beim nächsten Aufruf, haengender Prozessbaum wird per taskkill beendet | alle ok | ✅ | 2026-10-04 |
 | 2b.8 | Offline-Tests (ohne TIA): Prozessauswahl, Leerlauf-Trennung, Timeout ohne zweiten STA-Thread, Sandbox-Sperren | alle ok | ✅ | 2026-10-03, mit Attrappen |
 
 ---

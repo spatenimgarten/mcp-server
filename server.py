@@ -53,7 +53,7 @@ async def _rpc_handle_client(reader: asyncio.StreamReader, writer: asyncio.Strea
         if tool in _LONG_RUNNING:
             result = _start_bg(tool, args)
         else:
-            result = _dispatch(tool, args)
+            result = _route(tool, args)
         response = json.dumps({"ok": True, "result": result}, ensure_ascii=False)
     except TiaError as e:
         response = json.dumps({"ok": False, "error": e.to_dict()}, ensure_ascii=False)
@@ -87,6 +87,170 @@ async def _rpc_call(name: str, args: dict):
         writer.close()
 
 
+# ── Worker-Prozess ─────────────────────────────────────────────────────────────
+# Alle TIA-Openness-Aufrufe laufen in worker.py. Nur das Beenden des Prozesses gibt TIA
+# zuverlaessig frei (Dispose reicht nicht: TIA hing sonst z.B. beim Projekt-Schliessen).
+# Der Worker wird beim Trennen, nach Leerlauf und nach Timeout beendet; der naechste
+# Aufruf startet einen neuen und verbindet automatisch neu (connect_portal/attach_project).
+
+_LOCAL_TOOLS   = {"get_version", "restart_server"}
+_IDLE_KILL_S   = float(os.environ.get("TIA_MCP_IDLE_DISCONNECT", "120"))
+_WORKER_TIMEOUT_S = 600     # letzte Notbremse; tia.py bricht haengende Aufrufe nach 60/300 s selbst ab
+
+
+class _Worker:
+    def __init__(self):
+        self.proc = None
+        self.lines = None
+        self.lock = threading.Lock()
+        self.last_call = 0.0
+        self.connected = False      # connect_portal war erfolgreich -> nach Neustart wiederholen
+        self.attached = False       # attach/open/create_project war erfolgreich
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def _start(self):
+        import subprocess, queue, logging
+        here = os.path.dirname(os.path.abspath(__file__))
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.proc = subprocess.Popen(
+            [sys.executable, os.path.join(here, "worker.py")], cwd=here,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+            text=True, encoding="utf-8", bufsize=1, creationflags=flags)
+        self.lines = queue.Queue()
+        proc, q = self.proc, self.lines
+
+        def _reader():
+            for ln in proc.stdout:
+                q.put(ln)
+            q.put(None)                     # Prozess beendet
+        threading.Thread(target=_reader, name="worker-reader", daemon=True).start()
+        logging.getLogger("tia.server").info(f"Worker gestartet (PID {self.proc.pid})")
+
+    def kill(self, reason=""):
+        import logging
+        if self.proc is None:
+            return
+        proc, self.proc = self.proc, None
+        try:
+            proc.stdin.close()              # normaler Weg: Worker beendet sich bei EOF selbst
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            # Worker haengt (z.B. in einem TIA-Aufruf): ganzen Prozessbaum beenden. Unter einem
+            # venv ist proc nur der Starter; das eigentliche Python mit der TIA-Verbindung ist sein Kind.
+            import subprocess
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        logging.getLogger("tia.server").info(f"Worker beendet (PID {proc.pid}){': ' + reason if reason else ''}")
+
+    def _send(self, name, args, timeout):
+        import queue
+        self.proc.stdin.write(json.dumps({"tool": name, "args": args}, ensure_ascii=False) + "\n")
+        self.proc.stdin.flush()
+        try:
+            line = self.lines.get(timeout=timeout)
+        except queue.Empty:
+            self.kill(f"Timeout nach {timeout}s bei {name}")
+            raise TiaError("WORKER_TIMEOUT", f"{name}: keine Antwort nach {timeout}s, Worker beendet "
+                           "(wartet in TIA ein Dialog?). Der naechste Aufruf verbindet neu.", True)
+        if line is None:
+            self.kill("unerwartet beendet")
+            raise TiaError("WORKER_DIED", f"Worker-Prozess bei {name} unerwartet beendet "
+                           "(Details im Log). Der naechste Aufruf startet ihn neu.", True)
+        resp = json.loads(line)
+        if resp.get("ok"):
+            return resp["result"]
+        err = resp.get("error") or {}
+        raise TiaError(err.get("code", "WORKER_ERROR"), err.get("message", str(err)),
+                       bool(err.get("recoverable", False)), err.get("details"))
+
+    def call(self, name, args):
+        import time
+        with self.lock:
+            fresh = not self.alive()
+            if fresh:
+                self._start()
+            try:
+                # Nach Neustart des Workers die Verbindung wiederherstellen
+                if fresh and self.connected and name not in ("connect_portal", "open_portal"):
+                    self._send("connect_portal", {}, 120)
+                    if self.attached and name not in ("attach_project", "open_project", "create_project"):
+                        self._send("attach_project", {}, 120)
+                result = self._send(name, args, _WORKER_TIMEOUT_S)
+            finally:
+                self.last_call = time.monotonic()
+            if name in ("connect_portal", "open_portal"):
+                self.connected, self.attached = True, False
+            elif name in ("attach_project", "open_project", "create_project"):
+                self.attached = True
+            elif name == "close_project":
+                self.attached = False
+            elif name in ("disconnect_portal", "close_portal"):
+                self.connected = self.attached = False
+                self.kill(name)             # gibt TIA frei
+            return result
+
+    def idle_check(self):
+        import time
+        if _IDLE_KILL_S > 0 and self.alive() and not _bg_status["running"] \
+                and time.monotonic() - self.last_call > _IDLE_KILL_S and self.lock.acquire(blocking=False):
+            try:
+                self.kill(f"{_IDLE_KILL_S:.0f}s Leerlauf (naechster Aufruf verbindet neu)")
+            finally:
+                self.lock.release()
+
+
+_worker = _Worker()
+
+
+def _idle_loop():
+    import time
+    while True:
+        time.sleep(5)
+        try:
+            _worker.idle_check()
+        except Exception:
+            pass
+
+
+def _route(name, a):
+    """Primaer: lokale Tools selbst beantworten, alles andere an den Worker."""
+    if name in _LOCAL_TOOLS:
+        return _dispatch(name, a)
+    if name == "get_session_status" and (not _worker.alive() or _bg_status["running"]):
+        s = {"tia_installed": None, "portal_connected": False, "project_open": False,
+             "project_name": None, "worker": "laeuft" if _worker.alive() else "beendet",
+             "reconnect_on_next_call": _worker.connected, "project_on_next_call": _worker.attached,
+             "idle_disconnect_s": _IDLE_KILL_S}
+        with _bg_lock:
+            bg = dict(_bg_status)
+        if bg["running"]:
+            s["background_task"] = {"running": True, "tool": bg["tool"]}
+        elif bg["tool"]:
+            s["background_task"] = {"running": False, "tool": bg["tool"],
+                                    "result": bg["result"], "error": bg["error"]}
+            _bg_status.update({"tool": None, "result": None, "error": None})
+        return s
+    result = _worker.call(name, a)
+    if name == "get_session_status":
+        result["worker"] = "laeuft"
+        with _bg_lock:
+            bg = dict(_bg_status)
+        if bg["tool"] and not bg["running"]:
+            result["background_task"] = {"running": False, "tool": bg["tool"],
+                                         "result": bg["result"], "error": bg["error"]}
+            _bg_status.update({"tool": None, "result": None, "error": None})
+    return result
+
+
 def _start_bg(name: str, args: dict) -> dict:
     """Startet eine lange Operation im Background-Thread. Sofortige Rückkehr."""
     with _bg_lock:
@@ -96,7 +260,7 @@ def _start_bg(name: str, args: dict) -> dict:
 
     def _run():
         try:
-            r = _dispatch(name, args)
+            r = _route(name, args)
             with _bg_lock:
                 _bg_status.update({"running": False, "result": r, "error": None})
         except TiaError as e:
@@ -858,7 +1022,7 @@ async def call_tool(name, arguments):
                 result = _start_bg(name, a)
             else:
                 async with _com_lock:
-                    result = _dispatch(name, a)
+                    result = _route(name, a)
         else:
             result = await _rpc_call(name, a)
         return [types.TextContent(type="text",
@@ -989,14 +1153,15 @@ async def main():
     log.info(f"MCP Server startet als {role}")
 
     if primary:
-        tia.setup()
+        tia._setup_logging()        # TIA-Zugriffe laufen im Worker-Prozess (worker.py)
+        threading.Thread(target=_idle_loop, name="worker-idle", daemon=True).start()
 
     try:
         async with stdio_server() as (r, w):
             await server.run(r, w, server.create_initialization_options())
     finally:
         if primary:
-            tia.teardown()
+            _worker.kill("Server beendet")
             _stop_primary()
 
 if __name__ == "__main__":

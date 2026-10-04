@@ -449,6 +449,8 @@ INI_DEFAULTS = {
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja", "hmi": ""},
     "server": {"mcp_server": r"C:\tia-mcp\mcp-server", "autostart": "ja"},
+    "runtime": {"pruefen": "nein", "url": "http://localhost:4000/graphql", "benutzer": "",
+                "datei": "runtime_{hmi}.txt"},
     "filter": {"tabellen": "", "namen": "", "datentypen": "", "verknuepfung": "und", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": "",
                "skripte_auswerten": "ja"},
@@ -487,10 +489,169 @@ def ensure_connected():
         mcp_call("attach_project")
 
 
+def current_project():
+    """Name des in TIA offenen Projekts - nur wenn der MCP-Server schon laeuft und verbunden ist
+    (startet nichts und verbindet nicht neu). Sonst None."""
+    try:
+        status = _rpc("get_session_status", MCP_PORT, {})
+    except Exception:
+        return None
+    if status.get("ok"):
+        return (status.get("result") or {}).get("project_name") or None
+    return None
+
+
 def list_unified_hmis():
     ensure_connected()
     devs = mcp_call("list_devices")
     return [sw["item"] for d in devs.get("devices", []) for sw in d.get("software", []) if sw.get("type") == "Unified"]
+
+
+# ------------------------------------------------- Runtime-Pruefung (GraphQL) --
+# Unified laedt von Strukturvariablen nur die im HMI verwendeten Elemente (spart PowerTags).
+# Alle anderen kann der Bericht nicht lesen: Er bekommt null und bricht mit "Uncaught exception" ab.
+# Welche Elemente geladen sind, weiss nur die Runtime - deshalb hier per GraphQL nachfragen.
+GQL_READ = "query($n:[String!]!){tagValues(names:$n){name value{value} error{code description}}}"
+_rt = {"token": None, "url": None}
+
+
+class RuntimeError_(Exception):
+    pass
+
+
+def _gql(url, query, variables, token=None):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, data=json.dumps({"query": query, "variables": variables}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            res = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError_(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    except OSError as e:
+        raise RuntimeError_(f"Runtime nicht erreichbar ({url}): {e}")
+    if res.get("errors") and not res.get("data"):
+        raise RuntimeError_(json.dumps(res["errors"], ensure_ascii=False)[:300])
+    return res
+
+
+def runtime_login(url, user):
+    """Einmal pro Lauf anmelden; das Passwort wird verdeckt abgefragt und nicht gespeichert."""
+    if _rt["token"] and _rt["url"] == url:
+        return _rt["token"]
+    import getpass
+    _gql(url, "{__typename}", {})          # erreichbar? sonst gar nicht erst nach dem Passwort fragen
+    user = user or input("Runtime-Benutzer: ")
+    pw = getpass.getpass(f"Passwort fuer {user}: ")
+    r = _gql(url, "mutation($u:String!,$p:String!){login(username:$u,password:$p){token error{code description}}}",
+             {"u": user, "p": pw})
+    login = (r.get("data") or {}).get("login") or {}
+    if not login.get("token"):
+        raise RuntimeError_(f"Anmeldung an der Runtime fehlgeschlagen: {login.get('error') or r}")
+    _rt.update(token=login["token"], url=url)
+    return _rt["token"]
+
+
+def runtime_check(names, url, user):
+    """Liefert (nicht_geladen, unbekannt, ohne_wert) fuer die Kurznamen."""
+    token = runtime_login(url, user)
+    results = []
+
+    def read(batch):
+        try:
+            results.extend(_gql(url, GQL_READ, {"n": batch}, token)["data"]["tagValues"])
+        except RuntimeError_:
+            if len(batch) == 1:
+                results.append({"name": batch[0], "error": {"code": "abgelehnt", "description": "abgelehnt"}})
+                return
+            read(batch[:len(batch) // 2])
+            read(batch[len(batch) // 2:])
+
+    for i in range(0, len(names), 200):
+        read(names[i:i + 200])
+    missing, unknown, nulls = [], [], []
+    for x in results:
+        err = x.get("error") or {}
+        if err.get("code") not in (None, "0", 0):
+            desc = err.get("description") or ""
+            (missing if "leaf" in desc.lower() else unknown).append((x["name"], desc))
+        elif (x.get("value") or {}).get("value") is None:
+            nulls.append(x["name"])
+    return missing, unknown, nulls
+
+
+def runtime_precheck(hmi, rt, ini_dir, names=None):
+    """Vor der (langen) Verwendungsabfrage: Ist eine Runtime-Pruefung fuer dieses HMI moeglich?
+    Ja, wenn die laufende Runtime die Variablen des HMI kennt oder runtime_{hmi}.txt schon da ist.
+    Sonst Abort -> das HMI wird uebersprungen."""
+    spec = rt.get("datei", "")
+    store = resolve(spec.replace("{hmi}", hmi), ini_dir) if spec else None
+    try:
+        if names is None:
+            ensure_connected()
+            names = [t["name"] for t in mcp_call("list_hmi_tags", device_name=hmi).get("tags", [])]
+        if not names:
+            return
+        sample = names[::max(1, len(names) // 40)][:40]
+        # Strukturvariablen selbst melden "Only leaf ..." - auch das heisst: Variable ist bekannt
+        _missing, unknown, _nulls = runtime_check(sample, rt.get("url"), rt.get("benutzer", "").strip())
+        if len(unknown) > len(sample) / 2:
+            raise RuntimeError_(f"Die laufende Runtime gehoert nicht zu {hmi} ({len(unknown)} von {len(sample)} "
+                                "Stichproben unbekannt)")
+        print(f"Runtime laeuft mit {hmi}.")
+    except RuntimeError_ as e:
+        if store and store.exists():
+            print(f"Hinweis: {e} - nehme spaeter die letzte Pruefung aus {store}.")
+            return
+        raise Abort(f"{e}, und {store or 'runtime_' + hmi + '.txt'} fehlt - {hmi} uebersprungen. "
+                    f"Runtime von {hmi} starten (oder simulieren) und nochmal laufen lassen.")
+
+
+def apply_runtime_check(hmi, tags, rt, ini_dir):
+    """Elemente, die die Runtime nicht geladen hat, aus der Liste nehmen. Ergebnis wird in
+    rt['datei'] gemerkt und ohne laufende Runtime von dort genommen."""
+    import datetime
+    spec = rt.get("datei", "")
+    store = resolve(spec.replace("{hmi}", hmi), ini_dir) if spec else None
+    names = [short for _f, short, _d in tags]
+    try:
+        print(f"Runtime-Pruefung ({rt.get('url')}) fuer {len(names)} Variablen ...")
+        missing, unknown, nulls = runtime_check(names, rt.get("url"), rt.get("benutzer", "").strip())
+        if len(unknown) > len(names) / 2:
+            raise RuntimeError_(f"{len(unknown)} von {len(names)} Variablen kennt die Runtime nicht "
+                                f"(z.B. {unknown[0][0]}: {unknown[0][1]}) - laeuft dort ein anderes HMI als {hmi}?")
+        drop = {n for n, _d in missing + unknown}
+        if store:
+            store.write_text(f"# Runtime-Pruefung {hmi} vom {datetime.datetime.now():%d.%m.%Y %H:%M}: "
+                             "in der Runtime nicht vorhanden\n" +
+                             "".join(f"{n}\t{d}\n" for n, d in missing + unknown), encoding="utf-8")
+        for n, d in unknown[:10]:
+            print(f"   unbekannt: {n} ({d})")
+        if nulls:
+            print(f"Achtung: {len(nulls)} Variablen liefern gerade keinen Wert (Verbindung zur SPS?), "
+                  f"z.B. {', '.join(nulls[:5])} - der Bericht bricht dann ab. Sie bleiben in der Vorlage.")
+    except RuntimeError_ as e:
+        if not (store and store.exists()):
+            raise Abort(f"{e}\nOhne Runtime-Pruefung koennte der Bericht abbrechen. Runtime von {hmi} starten "
+                        "oder [runtime] pruefen = nein.")
+        print(f"Hinweis: {e}\nNehme die letzte Pruefung aus {store}.")
+        lines = store.read_text(encoding="utf-8").splitlines()
+        print(f"   {lines[0].lstrip('# ')}" if lines else "")
+        drop = {ln.split("\t", 1)[0] for ln in lines if ln and not ln.startswith("#")}
+    kept = [t for t in tags if t[1] not in drop]
+    print(f"Runtime: {len(tags) - len(kept)} Elemente von Unified wegoptimiert (nicht als PowerTag geladen) "
+          f"- {len(kept)} bleiben in der Vorlage.")
+    by_member = {}
+    for n in sorted(drop):
+        by_member.setdefault(re.sub(r"^[^.]+\.", "", n), []).append(n)
+    for mem, ns in sorted(by_member.items(), key=lambda x: -len(x[1]))[:15]:
+        print(f"   {mem:<30} {len(ns)}x")
+    if not kept:
+        raise Abort("Nach der Runtime-Pruefung bleibt keine Variable uebrig.")
+    return kept
 
 
 def main():
@@ -521,12 +682,12 @@ def main():
     if cp["server"].getboolean("autostart"):
         _server["dir"] = cp["server"].get("mcp_server")
     try:
-        _main(a, v, f, ini_dir)
+        _main(a, v, f, ini_dir, cp["runtime"])
     finally:
         stop_server()
 
 
-def _main(a, v, f, ini_dir):
+def _main(a, v, f, ini_dir, rt):
     # Welche HMIs?
     wanted = [h.strip() for h in re.split(r"[,\n]", v.get("hmi", "")) if h.strip()]
     if a.json:
@@ -561,7 +722,7 @@ def _main(a, v, f, ini_dir):
         if len(hmis) > 1:
             print(f"\n===== {hmi} =====")
         try:
-            run_hmi(hmi, a, v, f, ini_dir, multi=len(hmis) > 1)
+            run_hmi(hmi, a, v, f, ini_dir, rt, multi=len(hmis) > 1)
         except Abort as e:
             if len(hmis) == 1:
                 sys.exit(str(e))
@@ -571,7 +732,7 @@ def _main(a, v, f, ini_dir):
         sys.exit(f"\nNicht erzeugt: {', '.join(failed)}")
 
 
-def run_hmi(hmi, a, v, f, ini_dir, multi=False):
+def run_hmi(hmi, a, v, f, ini_dir, rt, multi=False):
     tables = ",".join(t.strip() for t in re.split(r"[,\n]", f.get("tabellen", "")) if t.strip())
     usage_spec = f.get("verwendung_datei", "")
     usage_file = resolve(usage_spec.replace("{hmi}", hmi), ini_dir) if usage_spec else None
@@ -584,9 +745,21 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
     required = not a.json or a.tabellen or f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
         or bool(tables) or bool(f.get("datentypen"))
     res = None
+    check_rt = rt.getboolean("pruefen") and not a.list and not a.tabellen
+    if check_rt and not (usage_file and usage_file.exists()):
+        runtime_precheck(hmi, rt, ini_dir)      # vor der langen Verwendungsabfrage
     if usage_file and usage_file.exists():
         res = json.loads(usage_file.read_text(encoding="utf-8"))
-        print(f"Verwendung aus {usage_file}")
+        if check_rt:
+            runtime_precheck(hmi, rt, ini_dir, [m["name"] for m in res.get("members", [])])
+        if not res.get("project"):
+            raise Abort(f"{usage_file} enthaelt keine Projektangabe (von vor dieser Version, evtl. aus einem "
+                        "anderen Projekt) - Datei loeschen, dann wird sie neu abgefragt.")
+        print(f"Verwendung aus {usage_file} (Projekt {res['project']}, abgefragt {res.get('saved', '?')})")
+        live = current_project()
+        if live and live != res["project"]:
+            raise Abort(f"{usage_file} gehoert zum Projekt {res['project']}, in TIA ist aber {live} offen. "
+                        "Datei loeschen (wird neu abgefragt) oder das passende Projekt oeffnen.")
     elif required or v.getboolean("gruppieren"):
         print(f"Verwendung live vom TIA-MCP-Server ({hmi}) ... "
               "(Fortschritt: C:\\tia-mcp\\logs\\tia_mcp.log)")
@@ -597,6 +770,10 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
                 raise Abort(f"{e}\nGebraucht wird der MCP-Server mit geoeffnetem Projekt oder eine verwendung_datei.")
             print(f"Hinweis: {e} - Ausgabe ohne Gruppierung.")
         if res and usage_file:
+            import datetime
+            res["saved"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+            if not res.get("project"):
+                res["project"] = current_project() or ""
             usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
             print(f"Verwendung gespeichert: {usage_file}")
     if res and res.get("device") and res["device"] != hmi:
@@ -662,6 +839,10 @@ def run_hmi(hmi, a, v, f, ini_dir, multi=False):
             print(f"nur_verwendete: {len(tags)} von {before} Eintraegen werden im HMI verwendet.")
             if not tags:
                 raise Abort("Keine verwendeten Variablen gefunden.")
+
+    # Nur Elemente, die die Runtime wirklich geladen hat (Unified optimiert ungenutzte Strukturelemente weg)
+    if check_rt:
+        tags = apply_runtime_check(hmi, tags, rt, ini_dir)
 
     # Gruppieren nach Tabelle (Reihenfolge wie unter 'tabellen', sonst alphabetisch)
     groups = None

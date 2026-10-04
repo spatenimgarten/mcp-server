@@ -1938,8 +1938,13 @@ def list_hmi_tag_usage(device_name, include_scripts=True, include_system=False):
                                        "tia_type": tia_type})
             phase(f"Systemvariablen: {len(system_members)}")
         phase("fertig, Ergebnis wird zurueckgegeben")
+        try:
+            proj_name, proj_path = str(_sess.project.Name), str(_sess.project.Path)
+        except Exception:
+            proj_name, proj_path = "", ""
 
-        return {"status": "ok", "device": device_name, "stats": stats,
+        return {"status": "ok", "device": device_name, "project": proj_name, "project_path": proj_path,
+                "stats": stats,
                 "usages": dict(sorted(usages.items())), "tags": tags,
                 "unused": [n for n, v in tags.items() if not v["used"]],
                 "members": members, "system_members": system_members,

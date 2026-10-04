@@ -15,7 +15,7 @@ VERSION_INFO = {
     "changes": [
         "1.16.0: list_hmi_tag_usage — Verwendung der HMI-Variablen (Unified): Bilder (Tag-/Skript-"
         "Dynamisierungen, Ereignisse, Eigenschafts-Ereignisse), Bit-/Analogalarme, Archivierung, globale "
-        "Skriptmodule; liefert usages, tags (used/where) und unused.",
+        "Skriptmodule; liefert usages, tags (table/datatype/used/where) und unused.",
         "1.15.0: TIA-Openness laeuft in eigenem Worker-Prozess (worker.py); Trennen, Leerlauf "
         "(TIA_MCP_IDLE_DISCONNECT, Standard 120 s) und Timeout beenden den Worker — nur das gibt TIA "
         "zuverlaessig frei (vorher hing TIA beim Projekt-Schliessen trotz Dispose). Naechster Aufruf "
@@ -1623,9 +1623,14 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
         log = _log("usage")
         prefix = f"{device_name}::"
         known = {}                                   # Wurzelname -> Tabelle
+        dtypes = {}                                  # Wurzelname -> Datentyp (z.B. UDT_Motor)
         for tbl in _hmi_tag_tables(sw):
             for t in tbl.Tags:
                 known[str(t.Name)] = str(tbl.Name)
+                try:
+                    dtypes[str(t.Name)] = str(t.DataType)
+                except Exception:
+                    dtypes[str(t.Name)] = ""
         usages = {}                                  # Referenz -> [Fundstellen]
         notes = []
         stats = {"screens": 0, "screen_items": 0, "dynamizations": 0, "scripts": 0, "alarms": 0}
@@ -1754,7 +1759,7 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
         used_roots = {}
         for ref, where in usages.items():
             used_roots.setdefault(_tag_root(ref), []).extend(where)
-        tags = {name: {"table": tbl, "used": name in used_roots,
+        tags = {name: {"table": tbl, "datatype": dtypes.get(name, ""), "used": name in used_roots,
                        "where": sorted(set(used_roots.get(name, [])))}
                 for name, tbl in sorted(known.items())}
         unknown = sorted(r for r in usages if _tag_root(r) not in known)

@@ -122,7 +122,12 @@ def name_matcher(spec):
 
 
 def read_tag_tables(xlsx_path):
-    """TIA-Variablenexport (HMITags.xlsx) lesen -> {Variablenname: Tabellenpfad}.
+    """{Variablenname: Tabellenpfad} aus dem TIA-Variablenexport."""
+    return {n: v["table"] for n, v in read_tag_info(xlsx_path).items()}
+
+
+def read_tag_info(xlsx_path):
+    """TIA-Variablenexport (HMITags.xlsx) lesen -> {Variablenname: {"table", "datatype"}}.
     Ohne Zusatzpakete (nur zipfile/xml), damit das Skript an der Anlage ohne pip laeuft."""
     import xml.etree.ElementTree as ET
     ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -160,7 +165,8 @@ def read_tag_tables(xlsx_path):
         cells = {col(c.get("r")): cell_value(c) for c in r.findall("m:c", ns)}
         name = cells.get(by_name["Name"], "")
         if name:
-            result[name] = cells.get(by_name["Path"], "")
+            result[name] = {"table": cells.get(by_name["Path"], ""),
+                            "datatype": cells.get(by_name.get("DataType", ""), "")}
     return result
 
 
@@ -422,7 +428,7 @@ INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja"},
-    "filter": {"variablen_excel": "", "tabellen": "", "namen": "", "system_tags": "nein",
+    "filter": {"variablen_excel": "", "tabellen": "", "namen": "", "datentypen": "", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
 
@@ -495,7 +501,7 @@ def main():
     # Verwendung: aus verwendung_datei oder live vom MCP-Server (dann ggf. in die Datei speichern)
     usage_file = resolve(f.get("verwendung_datei"), ini_dir)
     need_usage = f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
-        or (tables and not tags_xlsx)
+        or ((tables or f.get("datentypen")) and not tags_xlsx)
     res = None
     if need_usage or (usage_file and usage_file.exists()):
         if usage_file and usage_file.exists():
@@ -510,11 +516,25 @@ def main():
 
     # Tabellenzuordnung: aus der Excel-Datei, sonst aus dem Verwendungs-Ergebnis
     if tags_xlsx:
-        tag_table = read_tag_tables(tags_xlsx)
+        info = read_tag_info(tags_xlsx)
     elif res:
-        tag_table = {n: v.get("table", "") for n, v in res.get("tags", {}).items()}
+        info = res.get("tags", {})
     else:
-        tag_table = None
+        info = None
+    tag_table = {n: v.get("table", "") for n, v in info.items()} if info is not None else None
+    tag_type = {n: v.get("datatype", "") for n, v in info.items()} if info is not None else None
+
+    # Datentyp-Filter (Typ der Variable auf oberster Ebene, z.B. UDT_Motor)
+    type_match = name_matcher(f.get("datentypen"))
+    if type_match:
+        if tag_type is None or not any(tag_type.values()):
+            sys.exit("Fuer 'datentypen' wird variablen_excel oder eine aktuelle Verwendung (MCP-Server ab "
+                     "1.16.0 / neu gespeicherte verwendung_datei) gebraucht.")
+        before = len(tags)
+        tags = [t for t in tags if type_match(tag_type.get(root(t[1]), ""))]
+        print(f"datentypen = {' '.join(f.get('datentypen').split())}: {len(tags)} von {before} Eintraegen.")
+        if not tags:
+            sys.exit("Kein Datentyp passt auf den Eintrag 'datentypen'.")
 
     if tables:
         if tag_table is None:

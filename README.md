@@ -466,7 +466,7 @@ Erzeugt eine Excel-Berichtsvorlage für den WinCC-Unified-Bericht-Control aus de
 python tools\json2vorlage.py anlage.json
 ```
 
-Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Variablentabellen (`variablen_excel` = TIA-Export `HMITags.xlsx`, `tabellen`), nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823) und Spalte „Verwendet in“.
+Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Variablentabellen (`variablen_excel` = TIA-Export `HMITags.xlsx`, `tabellen`), nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823; mit `verwendung_datei` einmal abfragen und später ohne TIA wiederverwenden), Spalte „Verwendet in“ und **Gruppierung nach Variablentabellen** (`gruppieren`: graue Überschriftzeile je Tabelle, Reihenfolge wie unter `tabellen`).
 
 | Aufruf | Wirkung |
 |---|---|

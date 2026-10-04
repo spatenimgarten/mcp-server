@@ -204,7 +204,7 @@ def text_cell(ref, text, style=0):
 
 
 # Stil-Indizes, die patch_styles anlegt
-ST_DEFAULT, ST_BOLD, ST_TITLE, ST_DATETIME, ST_REAL, ST_HIDDEN, ST_QUALITY = 0, 1, 2, 3, 4, 5, 6
+ST_DEFAULT, ST_BOLD, ST_TITLE, ST_DATETIME, ST_REAL, ST_HIDDEN, ST_QUALITY, ST_GROUP = 0, 1, 2, 3, 4, 5, 6, 7
 
 
 def patch_styles(styles):
@@ -227,21 +227,29 @@ def patch_styles(styles):
     if "<numFmts" not in styles:
         styles = styles.replace("<fonts ", numfmts + "<fonts ", 1)
     nfont = styles.count("<font>")
+    # hellgraue Fuellung fuer Gruppen-Ueberschriften
+    styles = styles.replace("</fills>", '<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/>'
+                                        '<bgColor indexed="64"/></patternFill></fill></fills>', 1)
+    nfill = styles.count("<fill>")
+    styles = re.sub(r'<fills count="\d+"', f'<fills count="{nfill}"', styles, count=1)
     styles = re.sub(
         r'<cellXfs count="1">(<xf [^>]*/>)</cellXfs>',
-        lambda m: '<cellXfs count="7">' + m.group(1)
+        lambda m: '<cellXfs count="8">' + m.group(1)
         + f'<xf numFmtId="0" fontId="{nfont - 2}" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
         + f'<xf numFmtId="0" fontId="{nfont - 1}" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
         + '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf>'
         + '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
         + '<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
-        + '<xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf></cellXfs>',
+        + '<xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf>'
+        + f'<xf numFmtId="0" fontId="{nfont - 2}" fillId="{nfill - 1}" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>',
         styles, count=1)
     return styles, True
 
 
 # ------------------------------------------------------------ Vorlage bauen --
-def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality=False, usage=None):
+def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality=False, usage=None,
+          groups=None):
+    """groups: [(Tabellenname, [tags])] fuer gruppierte Ausgabe, sonst None."""
     zin = zipfile.ZipFile(base)
     names = zin.namelist()
     if "xl/webextensions/webextension1.xml" not in names:
@@ -276,16 +284,30 @@ def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality
             if o.get("name") == "Tag.Option_Name" and sc and sc.get("id"):
                 default_cfg_id = sc["id"]
 
+    # Zeilen-Layout: optional je Tabelle eine Ueberschriftzeile, Leerzeile zwischen den Gruppen
+    layout, r = [], first_row
+    for gi, (gname, gtags) in enumerate(groups or [(None, tags)]):
+        if gname is not None:
+            if gi:
+                r += 1
+            layout.append(("group", r, gname))
+            r += 1
+        for t in gtags:
+            layout.append(("tag", r, t))
+            r += 1
+    tag_rows = [(row, t) for kind, row, t in layout if kind == "tag"]
+    last = r - 1
+
     # Segmente: eins pro Variable
     new_cfg = {}
-    for i, (full, _short, dtype) in enumerate(tags):
+    for i, (row, (full, _short, dtype)) in enumerate(tag_rows):
         g = copy.deepcopy(sample)
         gid = str(uuid.uuid4())
         g["id"], g["name"], g["selected"] = gid, f"GroupConfiguration{i + 1}", False
         g["indicators"] = [copy.deepcopy(sample["indicators"][0])]
         ind = g["indicators"][0]
         ind.update(id=full, name=full, internalId=str(uuid.uuid4()), selected=False,
-                   location=f"{sheet_name}!B{first_row + i}", datatype=dtype or ind.get("datatype", ""))
+                   location=f"{sheet_name}!B{row}", datatype=dtype or ind.get("datatype", ""))
         ind["displayname"] = [{"lcid": "127", "text": full}]
         if quality:
             ind["configurationId"] = ind["internalId"]
@@ -329,7 +351,6 @@ def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality
     styles, styled = patch_styles(zin.read("xl/styles.xml").decode("utf-8"))
     st = (lambda s: s) if styled else (lambda s: ST_DEFAULT)
 
-    last = first_row + len(tags) - 1
     rows = [f'<row r="1">{text_cell("A1", title, st(ST_TITLE))}</row>',
             (f'<row r="2">{text_cell("A2", "Erstellt am:", st(ST_BOLD))}'
              f'<c r="B2" s="{st(ST_DATETIME)}"/><c r="C2" s="{st(ST_HIDDEN)}"/></row>' if heartbeat else ""),
@@ -337,8 +358,13 @@ def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality
             f'{text_cell(f"B{first_row - 1}", "Wert", st(ST_BOLD))}'
             + (text_cell(f"C{first_row - 1}", "Qualitaet", st(ST_BOLD)) if quality else "")
             + (text_cell(f"D{first_row - 1}", "Verwendet in", st(ST_BOLD)) if usage is not None else "") + '</row>']
-    for i, (_full, short, dtype) in enumerate(tags):
-        r = first_row + i
+    ncols = 2 + (1 if quality else 0) + (1 if usage is not None else 0)
+    for kind, r, item in layout:
+        if kind == "group":
+            fill = "".join(f'<c r="{c}{r}" s="{st(ST_GROUP)}"/>' for c in "BCD"[:ncols - 1])
+            rows.append(f'<row r="{r}">{text_cell(f"A{r}", item, st(ST_GROUP))}{fill}</row>')
+            continue
+        _full, short, dtype = item
         b = f'<c r="B{r}" s="{st(ST_REAL)}"/>' if dtype in REAL_TYPES and styled else ""
         q = f'<c r="C{r}" s="{st(ST_QUALITY)}"/>' if quality and styled else ""
         u = text_cell(f"D{r}", "; ".join(usage.get(short, [])) or "-") if usage is not None else ""
@@ -370,9 +396,10 @@ def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality
 INI_NAME = "json2vorlage.ini"
 INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
-                "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja"},
+                "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
+                "gruppieren": "ja"},
     "filter": {"variablen_excel": "", "tabellen": "", "name_filter": "", "system_tags": "nein",
-               "nur_verwendete": "nein", "spalte_verwendet": "nein"},
+               "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
 
 
@@ -431,35 +458,85 @@ def main():
     tags = read_tags(a.json, f.getboolean("system_tags"), f.get("name_filter") or None)
     if not tags:
         sys.exit("Keine Variablen gefunden (name_filter / system_tags pruefen).")
+    root = lambda short: short.split(".")[0].split("[")[0]
+    device = tags[0][0].split("::", 1)[0]
 
+    # Verwendung: aus verwendung_datei oder live vom MCP-Server (dann ggf. in die Datei speichern)
+    usage_file = resolve(f.get("verwendung_datei"), ini_dir)
+    need_usage = f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
+        or (tables and not tags_xlsx)
+    res = None
+    if need_usage or (usage_file and usage_file.exists()):
+        if usage_file and usage_file.exists():
+            res = json.loads(usage_file.read_text(encoding="utf-8"))
+            print(f"Verwendung aus {usage_file}")
+        else:
+            print(f"Verwendung live vom TIA-MCP-Server ({device}) ...")
+            res = load_usage(device)
+            if usage_file:
+                usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+                print(f"Verwendung gespeichert: {usage_file}")
+
+    # Tabellenzuordnung: aus der Excel-Datei, sonst aus dem Verwendungs-Ergebnis
     if tags_xlsx:
-        allowed, _ = table_filter(tags_xlsx, tables or None)
-        if not allowed:
-            sys.exit(f"Keine Variablen fuer tabellen = {tables} in {tags_xlsx} (--tabellen zeigt die Tabellen).")
+        tag_table = read_tag_tables(tags_xlsx)
+    elif res:
+        tag_table = {n: v.get("table", "") for n, v in res.get("tags", {}).items()}
+    else:
+        tag_table = None
+
+    if tables:
+        if tag_table is None:
+            sys.exit("Fuer 'tabellen' wird variablen_excel oder die Verwendung (MCP-Server / "
+                     "verwendung_datei) gebraucht.")
+        pats = [t.strip() for t in tables.split(",")]
+        def table_ok(tbl):
+            last_part = re.split(r"[\\/]", tbl)[-1]
+            return any(fnmatch.fnmatchcase(tbl, pt) or fnmatch.fnmatchcase(last_part, pt) for pt in pats)
         before = len(tags)
-        tags = [t for t in tags if t[1].split(".")[0].split("[")[0] in allowed]
-        missing = sorted(allowed - {t[1].split(".")[0].split("[")[0] for t in tags})
-        print(f"Filter {tags_xlsx.name}{' / ' + tables if tables else ''}: {len(tags)} von {before} Eintraegen.")
-        if missing:
-            print(f"Hinweis: {len(missing)} Variable(n) aus der Excel-Datei fehlen in der JSON: "
-                  f"{', '.join(missing[:10])}")
-        if not tags:
-            sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig.")
+        tags = [t for t in tags if table_ok(tag_table.get(root(t[1]), ""))]
+        print(f"tabellen = {tables}: {len(tags)} von {before} Eintraegen.")
+    elif tags_xlsx:
+        before = len(tags)
+        tags = [t for t in tags if root(t[1]) in tag_table]
+        print(f"Variablen aus {tags_xlsx.name}: {len(tags)} von {before} Eintraegen.")
+    if not tags:
+        sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig (--tabellen zeigt die Tabellen).")
 
     usage_map = None
-    if f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet"):
-        res = load_usage(tags[0][0].split("::", 1)[0])
+    if res and (f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet")):
         usage_map = {short: usage_for(short, res["usages"]) for _f, short, _d in tags}
         if f.getboolean("nur_verwendete"):
             before = len(tags)
             tags = [t for t in tags if usage_map[t[1]]]
-            print(f"nur_verwendete: {len(tags)} von {before} Variablen werden im HMI verwendet.")
+            print(f"nur_verwendete: {len(tags)} von {before} Eintraegen werden im HMI verwendet.")
             if not tags:
                 sys.exit("Keine verwendeten Variablen gefunden.")
 
+    # Gruppieren nach Tabelle (Reihenfolge wie unter 'tabellen', sonst alphabetisch)
+    groups = None
+    if v.getboolean("gruppieren"):
+        if tag_table is None:
+            print("Hinweis: gruppieren braucht variablen_excel oder die Verwendung - Ausgabe ohne Gruppen.")
+        else:
+            pats = [t.strip() for t in tables.split(",")] if tables else []
+            def order(tbl):
+                last_part = re.split(r"[\\/]", tbl)[-1]
+                idx = next((i for i, pt in enumerate(pats)
+                            if fnmatch.fnmatchcase(tbl, pt) or fnmatch.fnmatchcase(last_part, pt)), len(pats))
+                return (idx, tbl.lower())
+            by_table = {}
+            for t in tags:
+                by_table.setdefault(tag_table.get(root(t[1]), "") or "(ohne Tabelle)", []).append(t)
+            groups = [(tbl, by_table[tbl]) for tbl in sorted(by_table, key=order)]
+            tags = [t for _g, gt in groups for t in gt]
+
     print(f"{len(tags)} Variablen:")
-    for full, _s, dt in tags:
-        print(f"  {full:<45} {dt}")
+    for gname, gtags in groups or [(None, tags)]:
+        if gname is not None:
+            print(f"  [{gname}]")
+        for full, _s, dt in gtags:
+            print(f"  {full:<45} {dt}")
     if a.list:
         return
 
@@ -474,7 +551,8 @@ def main():
         print("Hinweis: @Heartbeat nicht in der JSON - Zeile 'Erstellt am:' entfaellt.")
     out = Path(v.get("ausgabe") or "Vorlage_Variablen.xlsx")
     build(tags, str(base), str(out), v.get("blatt"), v.get("titel"), v.getint("erste_zeile"),
-          heartbeat, v.getboolean("qualitaet"), usage_map if f.getboolean("spalte_verwendet") else None)
+          heartbeat, v.getboolean("qualitaet"), usage_map if f.getboolean("spalte_verwendet") else None,
+          groups)
     print(f"\nBasis: {base}\nVorlage geschrieben: {out.resolve()}")
 
 

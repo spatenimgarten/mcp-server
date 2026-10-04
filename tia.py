@@ -1652,7 +1652,7 @@ def _tag_root(ref):
     ref = ref.split("::", 1)[-1]
     return re.split(r"[.\[]", ref, 1)[0]
 
-def list_hmi_tag_usage(device_name, include_scripts=True):
+def list_hmi_tag_usage(device_name, include_scripts=True, include_system=False):
     """
     Wo werden die HMI-Variablen eines Unified-Geraets verwendet?
     Durchsucht Bilder (Tag-/Skript-Dynamisierungen, Ereignisse, Eigenschafts-Ereignisse),
@@ -1853,10 +1853,17 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                     members.append({"name": name, "datatype": _runtime_type(tia_type), "tia_type": tia_type,
                                     "root": str(t.Name), "table": str(tbl.Name)})
         phase(f"Variablen aufgeloest: {len(members)} Eintraege")
+        # Systemvariablen nur auf Anforderung - in einem grossen Projekt blieb das Lesen von
+        # SystemTags haengen, und json2vorlage braucht sie normalerweise nicht
         system_members = []
-        for t in getattr(sw, "SystemTags", None) or []:
-            tia_type = str(t.DataType)
-            system_members.append({"name": str(t.Name), "datatype": _runtime_type(tia_type), "tia_type": tia_type})
+        if include_system:
+            phase("Systemvariablen lesen ...")
+            for t in sw.SystemTags:
+                tia_type = str(t.DataType)
+                system_members.append({"name": str(t.Name), "datatype": _runtime_type(tia_type),
+                                       "tia_type": tia_type})
+            phase(f"Systemvariablen: {len(system_members)}")
+        phase("fertig, Ergebnis wird zurueckgegeben")
 
         return {"status": "ok", "device": device_name, "stats": stats,
                 "usages": dict(sorted(usages.items())), "tags": tags,

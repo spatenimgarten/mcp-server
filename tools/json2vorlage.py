@@ -12,7 +12,7 @@ Die Ini-Datei ist kommentiert; fehlt sie, gelten die Standardwerte.
 
 Weitere Aufrufe:
     python json2vorlage.py anlage.json --list         Variablen nur anzeigen
-    python json2vorlage.py anlage.json --tabellen     Variablentabellen aus der Excel-Datei anzeigen
+    python json2vorlage.py anlage.json --tabellen     Variablentabellen mit Anzahl Variablen anzeigen
     python json2vorlage.py anlage.json --ini linie2.ini   andere Ini-Datei verwenden
 
 Ergebnis: Jede Variable steht untereinander (Spalte A Name, Spalte B Wert), UDTs und Arrays
@@ -121,68 +121,8 @@ def name_matcher(spec):
     return match
 
 
-def read_tag_tables(xlsx_path):
-    """{Variablenname: Tabellenpfad} aus dem TIA-Variablenexport."""
-    return {n: v["table"] for n, v in read_tag_info(xlsx_path).items()}
-
-
-def read_tag_info(xlsx_path):
-    """TIA-Variablenexport (HMITags.xlsx) lesen -> {Variablenname: {"table", "datatype"}}.
-    Ohne Zusatzpakete (nur zipfile/xml), damit das Skript an der Anlage ohne pip laeuft."""
-    import xml.etree.ElementTree as ET
-    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-          "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
-    z = zipfile.ZipFile(xlsx_path)
-    shared = []
-    if "xl/sharedStrings.xml" in z.namelist():
-        for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", ns):
-            shared.append("".join(t.text or "" for t in si.iter(f"{{{ns['m']}}}t")))
-    wb = ET.fromstring(z.read("xl/workbook.xml"))
-    rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-    sheets = {sh.get("name"): sh.get(f"{{{ns['r']}}}id") for sh in wb.find("m:sheets", ns)}
-    rid = sheets.get("Hmi Tags") or next(iter(sheets.values()))
-    target = next(r.get("Target") for r in rels if r.get("Id") == rid)
-    sheet = ET.fromstring(z.read("xl/" + target.lstrip("/").removeprefix("xl/")))
-
-    def cell_value(c):
-        v = c.find("m:v", ns)
-        if c.get("t") == "s" and v is not None:
-            return shared[int(v.text)]
-        if c.get("t") == "inlineStr":
-            return "".join(t.text or "" for t in c.iter(f"{{{ns['m']}}}t"))
-        return v.text if v is not None else ""
-
-    def col(ref):
-        return re.match(r"[A-Z]+", ref).group(0)
-
-    rows = sheet.find("m:sheetData", ns).findall("m:row", ns)
-    header = {col(c.get("r")): cell_value(c) for c in rows[0].findall("m:c", ns)}
-    by_name = {v: k for k, v in header.items()}
-    if "Name" not in by_name or "Path" not in by_name:
-        sys.exit(f"{xlsx_path}: Spalten 'Name' und 'Path' nicht gefunden (TIA-Export der HMI-Variablen?).")
-    result = {}
-    for r in rows[1:]:
-        cells = {col(c.get("r")): cell_value(c) for c in r.findall("m:c", ns)}
-        name = cells.get(by_name["Name"], "")
-        if name:
-            result[name] = {"table": cells.get(by_name["Path"], ""),
-                            "datatype": cells.get(by_name.get("DataType", ""), "")}
-    return result
-
-
-def table_filter(xlsx_path, tables=None):
-    """Erlaubte Variablen (oberste Ebene) aus dem Export, optional nur bestimmte Tabellen.
-    tables: Kommaliste, Platzhalter erlaubt (SPS_*); verglichen mit vollem Pfad und letztem Teil."""
-    tag_tables = read_tag_tables(xlsx_path)
-    if not tables:
-        return set(tag_tables), tag_tables
-    pats = [t.strip() for t in tables.split(",") if t.strip()]
-
-    def match(path):
-        last = re.split(r"[\\/]", path)[-1]
-        return any(fnmatch.fnmatchcase(path, pt) or fnmatch.fnmatchcase(last, pt) for pt in pats)
-    allowed = {n for n, pth in tag_tables.items() if match(pth)}
-    return allowed, tag_tables
+class McpError(Exception):
+    pass
 
 
 def mcp_call(tool, port=47823, **args):
@@ -192,16 +132,14 @@ def mcp_call(tool, port=47823, **args):
             sock.sendall((json.dumps({"tool": tool, "args": args}) + "\n").encode())
             r = json.loads(sock.makefile("rb").readline())
     except OSError as e:
-        sys.exit(f"MCP-Server nicht erreichbar (127.0.0.1:{port}): {e}")
+        raise McpError(f"MCP-Server nicht erreichbar (127.0.0.1:{port}): {e}")
     if not r["ok"]:
-        sys.exit(f"MCP-Fehler bei {tool}: {r['error']}")
+        raise McpError(f"MCP-Fehler bei {tool}: {r['error']}")
     return r["result"]
 
 
-def load_usage(device, usage_json=None):
-    """Verwendung der Variablen: aus Datei (--usage-json) oder live vom MCP-Server."""
-    if usage_json:
-        return json.loads(Path(usage_json).read_text(encoding="utf-8"))
+def load_usage(device):
+    """Verwendung der Variablen live vom MCP-Server (Projekt muss in TIA offen sein)."""
     status = mcp_call("get_session_status")
     if not status.get("project_open") and not status.get("auto_reconnect"):
         mcp_call("connect_portal")
@@ -428,7 +366,7 @@ INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja"},
-    "filter": {"variablen_excel": "", "tabellen": "", "namen": "", "datentypen": "", "system_tags": "nein",
+    "filter": {"tabellen": "", "namen": "", "datentypen": "", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
 
@@ -461,7 +399,7 @@ def main():
     ap.add_argument("json", help="Offline-Konfiguration aus dem Bericht-Control (.json)")
     ap.add_argument("--ini", help=f"andere Ini-Datei (Standard: {INI_NAME} neben dem Skript)")
     ap.add_argument("--list", action="store_true", help="Variablen nur anzeigen, keine Datei schreiben")
-    ap.add_argument("--tabellen", action="store_true", help="Variablentabellen aus der Excel-Datei anzeigen")
+    ap.add_argument("--tabellen", action="store_true", help="Variablentabellen mit Anzahl Variablen anzeigen")
     a = ap.parse_args()
 
     ini_path = Path(a.ini) if a.ini else Path(__file__).resolve().parent / INI_NAME
@@ -472,22 +410,50 @@ def main():
     ini_dir = ini_path.resolve().parent
     print(f"Einstellungen: {ini_path if ini_path.exists() else 'Standardwerte (keine Ini-Datei)'}")
 
-    tags_xlsx = resolve(f.get("variablen_excel"), ini_dir)
-    if tags_xlsx and not tags_xlsx.exists():
-        sys.exit(f"variablen_excel nicht gefunden: {tags_xlsx}")
     tables = ",".join(t.strip() for t in re.split(r"[,\n]", f.get("tabellen", "")) if t.strip())
-
-    if a.tabellen:
-        if not tags_xlsx:
-            sys.exit("In der Ini-Datei ist keine variablen_excel eingetragen.")
-        from collections import Counter
-        for tbl, n in sorted(Counter(read_tag_tables(tags_xlsx).values()).items()):
-            print(f"  {tbl:<40} {n} Variablen")
-        return
+    usage_file = resolve(f.get("verwendung_datei"), ini_dir)
 
     tags = read_tags(a.json, f.getboolean("system_tags"))
     if not tags:
         sys.exit("Keine Variablen in der JSON gefunden.")
+    root = lambda short: short.split(".")[0].split("[")[0]
+    device = tags[0][0].split("::", 1)[0]
+
+    # Verwendung (liefert auch Tabelle und Datentyp jeder Variable):
+    # aus verwendung_datei oder live vom MCP-Server (dann ggf. in die Datei speichern).
+    # Pflicht fuer Filter; fuer "nur gruppieren" optional.
+    required = a.tabellen or f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
+        or bool(tables) or bool(f.get("datentypen"))
+    res = None
+    if usage_file and usage_file.exists():
+        res = json.loads(usage_file.read_text(encoding="utf-8"))
+        print(f"Verwendung aus {usage_file}")
+    elif required or v.getboolean("gruppieren"):
+        print(f"Verwendung live vom TIA-MCP-Server ({device}) ...")
+        try:
+            res = load_usage(device)
+        except McpError as e:
+            if required:
+                sys.exit(f"{e}\nFuer tabellen / datentypen / nur_verwendete wird der MCP-Server mit "
+                         "geoeffnetem Projekt oder eine verwendung_datei gebraucht.")
+            print(f"Hinweis: {e} - Ausgabe ohne Gruppierung.")
+        if res and usage_file:
+            usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"Verwendung gespeichert: {usage_file}")
+    info = res.get("tags", {}) if res else {}
+    tag_table = {n: x.get("table", "") for n, x in info.items()}
+    tag_type = {n: x.get("datatype", "") for n, x in info.items()}
+
+    if a.tabellen:
+        from collections import Counter
+        for tbl, n in sorted(Counter(tag_table.values()).items()):
+            print(f"  {tbl:<40} {n} Variablen")
+        return
+
+    def table_match(tbl, pat):
+        return fnmatch.fnmatchcase(tbl, pat) or fnmatch.fnmatchcase(re.split(r"[\\/]", tbl)[-1], pat)
+
+    # Filter: namen -> datentypen -> tabellen -> nur_verwendete
     match = name_matcher(f.get("namen"))
     if match:
         before = len(tags)
@@ -495,41 +461,12 @@ def main():
         print(f"namen = {' '.join(f.get('namen').split())}: {len(tags)} von {before} Eintraegen.")
         if not tags:
             sys.exit("Kein Name passt auf den Eintrag 'namen'.")
-    root = lambda short: short.split(".")[0].split("[")[0]
-    device = tags[0][0].split("::", 1)[0]
 
-    # Verwendung: aus verwendung_datei oder live vom MCP-Server (dann ggf. in die Datei speichern)
-    usage_file = resolve(f.get("verwendung_datei"), ini_dir)
-    need_usage = f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet") \
-        or ((tables or f.get("datentypen")) and not tags_xlsx)
-    res = None
-    if need_usage or (usage_file and usage_file.exists()):
-        if usage_file and usage_file.exists():
-            res = json.loads(usage_file.read_text(encoding="utf-8"))
-            print(f"Verwendung aus {usage_file}")
-        else:
-            print(f"Verwendung live vom TIA-MCP-Server ({device}) ...")
-            res = load_usage(device)
-            if usage_file:
-                usage_file.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
-                print(f"Verwendung gespeichert: {usage_file}")
-
-    # Tabellenzuordnung: aus der Excel-Datei, sonst aus dem Verwendungs-Ergebnis
-    if tags_xlsx:
-        info = read_tag_info(tags_xlsx)
-    elif res:
-        info = res.get("tags", {})
-    else:
-        info = None
-    tag_table = {n: v.get("table", "") for n, v in info.items()} if info is not None else None
-    tag_type = {n: v.get("datatype", "") for n, v in info.items()} if info is not None else None
-
-    # Datentyp-Filter (Typ der Variable auf oberster Ebene, z.B. UDT_Motor)
     type_match = name_matcher(f.get("datentypen"))
     if type_match:
-        if tag_type is None or not any(tag_type.values()):
-            sys.exit("Fuer 'datentypen' wird variablen_excel oder eine aktuelle Verwendung (MCP-Server ab "
-                     "1.16.0 / neu gespeicherte verwendung_datei) gebraucht.")
+        if not any(tag_type.values()):
+            sys.exit("Die Verwendung enthaelt keine Datentypen (alte verwendung_datei?) - Datei loeschen, "
+                     "dann wird sie neu abgefragt.")
         before = len(tags)
         tags = [t for t in tags if type_match(tag_type.get(root(t[1]), ""))]
         print(f"datentypen = {' '.join(f.get('datentypen').split())}: {len(tags)} von {before} Eintraegen.")
@@ -537,22 +474,12 @@ def main():
             sys.exit("Kein Datentyp passt auf den Eintrag 'datentypen'.")
 
     if tables:
-        if tag_table is None:
-            sys.exit("Fuer 'tabellen' wird variablen_excel oder die Verwendung (MCP-Server / "
-                     "verwendung_datei) gebraucht.")
         pats = [t.strip() for t in tables.split(",")]
-        def table_ok(tbl):
-            last_part = re.split(r"[\\/]", tbl)[-1]
-            return any(fnmatch.fnmatchcase(tbl, pt) or fnmatch.fnmatchcase(last_part, pt) for pt in pats)
         before = len(tags)
-        tags = [t for t in tags if table_ok(tag_table.get(root(t[1]), ""))]
+        tags = [t for t in tags if any(table_match(tag_table.get(root(t[1]), ""), pt) for pt in pats)]
         print(f"tabellen = {tables}: {len(tags)} von {before} Eintraegen.")
-    elif tags_xlsx:
-        before = len(tags)
-        tags = [t for t in tags if root(t[1]) in tag_table]
-        print(f"Variablen aus {tags_xlsx.name}: {len(tags)} von {before} Eintraegen.")
-    if not tags:
-        sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig (--tabellen zeigt die Tabellen).")
+        if not tags:
+            sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig (--tabellen zeigt die Tabellen).")
 
     usage_map = None
     if res and (f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet")):
@@ -566,21 +493,16 @@ def main():
 
     # Gruppieren nach Tabelle (Reihenfolge wie unter 'tabellen', sonst alphabetisch)
     groups = None
-    if v.getboolean("gruppieren"):
-        if tag_table is None:
-            print("Hinweis: gruppieren braucht variablen_excel oder die Verwendung - Ausgabe ohne Gruppen.")
-        else:
-            pats = [t.strip() for t in tables.split(",")] if tables else []
-            def order(tbl):
-                last_part = re.split(r"[\\/]", tbl)[-1]
-                idx = next((i for i, pt in enumerate(pats)
-                            if fnmatch.fnmatchcase(tbl, pt) or fnmatch.fnmatchcase(last_part, pt)), len(pats))
-                return (idx, tbl.lower())
-            by_table = {}
-            for t in tags:
-                by_table.setdefault(tag_table.get(root(t[1]), "") or "(ohne Tabelle)", []).append(t)
-            groups = [(tbl, by_table[tbl]) for tbl in sorted(by_table, key=order)]
-            tags = [t for _g, gt in groups for t in gt]
+    if v.getboolean("gruppieren") and tag_table:
+        pats = [t.strip() for t in tables.split(",")] if tables else []
+        def order(tbl):
+            idx = next((i for i, pt in enumerate(pats) if table_match(tbl, pt)), len(pats))
+            return (idx, tbl.lower())
+        by_table = {}
+        for t in tags:
+            by_table.setdefault(tag_table.get(root(t[1]), "") or "(ohne Tabelle)", []).append(t)
+        groups = [(tbl, by_table[tbl]) for tbl in sorted(by_table, key=order)]
+        tags = [t for _g, gt in groups for t in gt]
 
     print(f"{len(tags)} Variablen:")
     for gname, gtags in groups or [(None, tags)]:

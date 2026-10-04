@@ -466,16 +466,16 @@ Erzeugt eine Excel-Berichtsvorlage für den WinCC-Unified-Bericht-Control aus de
 python tools\json2vorlage.py anlage.json
 ```
 
-Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Namen (`namen`: Textteile, Muster mit `*`, Ausschluss mit `!`), nach Datentyp (`datentypen`, z. B. `UDT_Motor`) und nach Variablentabellen (`variablen_excel` = TIA-Export `HMITags.xlsx`, `tabellen`), nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823; mit `verwendung_datei` einmal abfragen und später ohne TIA wiederverwenden), Spalte „Verwendet in“ und **Gruppierung nach Variablentabellen** (`gruppieren`: graue Überschriftzeile je Tabelle, Reihenfolge wie unter `tabellen`).
+Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Namen (`namen`: Textteile, Muster mit `*`, Ausschluss mit `!`), nach Datentyp (`datentypen`, z. B. `UDT_Motor`) und nach Variablentabellen (`tabellen`), nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823; mit `verwendung_datei` einmal abfragen und später ohne TIA wiederverwenden), Spalte „Verwendet in“ und **Gruppierung nach Variablentabellen** (`gruppieren`: graue Überschriftzeile je Tabelle, Reihenfolge wie unter `tabellen`).
 
 | Aufruf | Wirkung |
 |---|---|
 | `json2vorlage.py anlage.json` | Vorlage nach den Einstellungen der Ini erzeugen |
 | `… --list` | Variablen nur anzeigen |
-| `… --tabellen` | Variablentabellen aus `variablen_excel` anzeigen |
+| `… --tabellen` | Variablentabellen mit Anzahl Variablen anzeigen |
 | `… --ini linie2.ini` | andere Ini-Datei verwenden (z. B. eine pro Anlage) |
 
-Die Basis-Mappe legt man einmal mit dem Excel-Add-in an: leere Mappe, ein Einzelwert-Segment, speichern. Relative Pfade in der Ini werden zuerst im aktuellen Ordner, dann neben der Ini gesucht.
+Tabellen, Datentypen und Verwendung kommen über `list_hmi_tag_usage` aus dem TIA-Projekt (live oder aus `verwendung_datei`); ein Variablen-Export aus TIA ist nicht nötig. Die Basis-Mappe legt man einmal mit dem Excel-Add-in an: leere Mappe, ein Einzelwert-Segment, speichern. Relative Pfade in der Ini werden zuerst im aktuellen Ordner, dann neben der Ini gesucht.
 
 Getestet mit WinCC Unified PC RT V21 (Vorlagenformat 5.0.0.0): Werte, UDT-Elemente, verschachtelte UDTs, Arrays, DateTime, Time/LTime (kommen als Text), Qualität (`GOOD`/`UNCERTAIN`/`BAD` mit Code) und Erstellungszeitpunkt (Zeitstempel von `@Heartbeat`).
 

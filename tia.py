@@ -18,7 +18,8 @@ VERSION_INFO = {
         "neu aufgebaut; alte Verbindungen werden per Dispose freigegeben (connect_portal, Timeout); nach "
         "Timeout kein zweiter STA-Thread mehr; TIA-Rueckfragen werden abgebrochen statt zu blockieren "
         "(TIA_MCP_DIALOGS); connect_portal waehlt den richtigen TIA-Prozess; close_portal beendet nur den "
-        "eigenen Prozess. Neu: disconnect_portal. Fix: create_project, open_portal. Sandbox: Exception, "
+        "eigenen Prozess; Dialog-Handler werden vor Dispose abgemeldet (sonst hing TIA beim "
+        "Projekt-Schliessen). Neu: disconnect_portal. Fix: create_project, open_portal. Sandbox: Exception, "
         "secure_string, dir_info, file_info.",
         "1.14.1: set_plc_block_source — ueber externe Quelle (GenerateSource / GenerateBlocksFromSource) "
         "statt Token-XML; ganzer Baustein oder nur Rumpf; Offline-Pruefung; Baustein wird danach "
@@ -346,29 +347,37 @@ class _Session:
         _install_dialog_handlers(self.portal)
 
     def release(self):
-        """Openness-Verbindung freigeben (Dispose). Im STA-Thread aufrufen."""
-        p, self.portal, self.project, self._handlers = self.portal, None, None, None
+        """Openness-Verbindung freigeben (Handler abmelden + Dispose). Im STA-Thread aufrufen."""
+        p, h = self.portal, self._handlers
+        self.portal, self.project, self._handlers = None, None, None
         if p is None:
             return
-        try:
-            p.Dispose()
-        except Exception as e:
-            _log("session").warning(f"Dispose fehlgeschlagen (ignoriert): {e}")
+        _safe_dispose(p, h)
 
     def release_async(self, wait_s=5):
         """Freigabe aus fremdem Thread (nach STA-Timeout): Dispose in Hilfs-Thread, damit
         ein haengender TIA-Aufruf den Aufrufer nicht mitblockiert."""
-        p, self.portal, self.project, self._handlers = self.portal, None, None, None
+        p, h = self.portal, self._handlers
+        self.portal, self.project, self._handlers = None, None, None
         if p is None:
             return
-        t = threading.Thread(target=lambda: _safe_dispose(p), name="TIA-Dispose", daemon=True)
+        t = threading.Thread(target=lambda: _safe_dispose(p, h), name="TIA-Dispose", daemon=True)
         t.start(); t.join(wait_s)
         if t.is_alive():
             _log("session").warning(f"Dispose nach Timeout dauert > {wait_s}s — laeuft im Hintergrund weiter.")
 
 _sess = _Session()
 
-def _safe_dispose(portal):
+def _safe_dispose(portal, handlers=None):
+    """Dialog-Handler abmelden, dann Dispose. Bleiben die Handler angemeldet, versucht TIA
+    beim Schliessen des Projekts noch den (getrennten) Client zu benachrichtigen und haengt,
+    bis der Server-Prozess endet."""
+    if handlers:
+        try:
+            portal.Confirmation -= handlers[0]
+            portal.Notification -= handlers[1]
+        except Exception as e:
+            _log("session").warning(f"Dialog-Handler abmelden fehlgeschlagen (ignoriert): {e}")
     try:
         portal.Dispose()
     except Exception as e:
@@ -605,8 +614,7 @@ def close_portal():
 
     def _dispose():
         try:
-            if _sess.portal:
-                _sess.portal.Dispose()
+            _sess.release()          # Handler abmelden + Dispose
         except Exception as e:
             dispose_error[0] = e
         finally:

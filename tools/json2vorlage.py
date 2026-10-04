@@ -97,28 +97,48 @@ def find_heartbeat(json_path):
     return None
 
 
+def _name_hit(value, pat):
+    """Namens-Semantik: ohne Platzhalter = enthaelt; mit * oder ? = Muster fuer den ganzen Wert.
+    [ ] bleiben normaler Text (Array-Index wie Messwerte[3]). Gross-/Kleinschreibung egal."""
+    value, pat = value.lower(), pat.lower()
+    if any(c in pat for c in "*?"):
+        return fnmatch.fnmatchcase(value, pat.replace("[", "[[]"))
+    return pat in value
+
+
+def _table_hit(table, pat):
+    """Tabellen: genauer Name oder Muster mit * / ?, verglichen mit vollem Pfad und letztem Teil."""
+    table, pat = table.lower(), pat.lower()
+    last = re.split(r"[\\/]", table)[-1]
+    return fnmatch.fnmatchcase(table, pat) or fnmatch.fnmatchcase(last, pat)
+
+
+class Filter:
+    """Ein Ini-Filtereintrag: Komma oder eine pro Zeile, '!' davor = ausschliessen."""
+
+    def __init__(self, spec, hit=_name_hit):
+        entries = [e.strip() for e in re.split(r"[,\n]", spec or "") if e.strip()]
+        self.incl = [e for e in entries if not e.startswith("!")]
+        self.excl = [e[1:].strip() for e in entries if e.startswith("!") and e[1:].strip()]
+        self.hit = hit
+
+    def __bool__(self):
+        return bool(self.incl or self.excl)
+
+    def includes(self, value):
+        return any(self.hit(value, pt) for pt in self.incl)
+
+    def excludes(self, value):
+        return any(self.hit(value, pt) for pt in self.excl)
+
+    def matches(self, value):
+        return (not self.incl or self.includes(value)) and not self.excludes(value)
+
+
 def name_matcher(spec):
-    """Filter aus dem Ini-Eintrag 'namen': Komma oder eine pro Zeile.
-    Ohne Platzhalter = Name enthaelt den Text; mit * oder ? = Muster fuer den ganzen Namen;
-    '!' davor = ausschliessen. Gross-/Kleinschreibung egal. Nur Ausschluesse = alles andere."""
-    entries = [e.strip() for e in re.split(r"[,\n]", spec or "") if e.strip()]
-    if not entries:
-        return None
-    incl = [e.lower() for e in entries if not e.startswith("!")]
-    excl = [e[1:].strip().lower() for e in entries if e.startswith("!")]
-
-    def hit(name, pat):
-        # Nur * und ? sind Platzhalter; [ ] bleiben normaler Text (Array-Index wie Messwerte[3])
-        if any(c in pat for c in "*?"):
-            return fnmatch.fnmatchcase(name, pat.replace("[", "[[]"))
-        return pat in name
-
-    def match(short):
-        n = short.lower()
-        if incl and not any(hit(n, p) for p in incl):
-            return False
-        return not any(hit(n, p) for p in excl)
-    return match
+    """Kompatibilitaet: Funktion 'passt?' fuer einen namen-Eintrag oder None."""
+    flt = Filter(spec)
+    return flt.matches if flt else None
 
 
 class McpError(Exception):
@@ -366,7 +386,7 @@ INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja"},
-    "filter": {"tabellen": "", "namen": "", "datentypen": "", "system_tags": "nein",
+    "filter": {"tabellen": "", "namen": "", "datentypen": "", "verknuepfung": "und", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
 
@@ -450,36 +470,34 @@ def main():
             print(f"  {tbl:<40} {n} Variablen")
         return
 
-    def table_match(tbl, pat):
-        return fnmatch.fnmatchcase(tbl, pat) or fnmatch.fnmatchcase(re.split(r"[\\/]", tbl)[-1], pat)
-
-    # Filter: namen -> datentypen -> tabellen -> nur_verwendete
-    match = name_matcher(f.get("namen"))
-    if match:
+    # Filter namen / datentypen / tabellen, verknuepft mit UND (alle muessen passen) oder
+    # ODER (einer reicht). Ausschluesse mit ! gelten immer. Danach ggf. nur_verwendete.
+    mode = (f.get("verknuepfung") or "und").strip().lower()
+    if mode not in ("und", "oder"):
+        sys.exit(f"verknuepfung = {mode}: erlaubt sind 'und' oder 'oder'.")
+    f_name, f_type, f_table = Filter(f.get("namen")), Filter(f.get("datentypen")), Filter(tables, _table_hit)
+    if f_type and not any(tag_type.values()):
+        sys.exit("Die Verwendung enthaelt keine Datentypen (alte verwendung_datei?) - Datei loeschen, "
+                 "dann wird sie neu abgefragt.")
+    active = [(flt, get, label) for flt, get, label in (
+        (f_name, lambda t: t[1], "namen"),
+        (f_type, lambda t: tag_type.get(root(t[1]), ""), "datentypen"),
+        (f_table, lambda t: tag_table.get(root(t[1]), ""), "tabellen")) if flt]
+    if active:
         before = len(tags)
-        tags = [t for t in tags if match(t[1])]
-        print(f"namen = {' '.join(f.get('namen').split())}: {len(tags)} von {before} Eintraegen.")
+        if mode == "und":
+            tags = [t for t in tags if all(flt.matches(get(t)) for flt, get, _l in active)]
+        else:
+            positive = [(flt, get) for flt, get, _l in active if flt.incl]
+            tags = [t for t in tags
+                    if (not positive or any(flt.includes(get(t)) for flt, get in positive))
+                    and not any(flt.excludes(get(t)) for flt, get, _l in active)]
+        desc = f" {mode.upper()} ".join(
+            f"{label} = {', '.join(flt.incl + ['!' + e for e in flt.excl])}" for flt, _g, label in active)
+        print(f"Filter {desc}: {len(tags)} von {before} Eintraegen.")
         if not tags:
-            sys.exit("Kein Name passt auf den Eintrag 'namen'.")
-
-    type_match = name_matcher(f.get("datentypen"))
-    if type_match:
-        if not any(tag_type.values()):
-            sys.exit("Die Verwendung enthaelt keine Datentypen (alte verwendung_datei?) - Datei loeschen, "
-                     "dann wird sie neu abgefragt.")
-        before = len(tags)
-        tags = [t for t in tags if type_match(tag_type.get(root(t[1]), ""))]
-        print(f"datentypen = {' '.join(f.get('datentypen').split())}: {len(tags)} von {before} Eintraegen.")
-        if not tags:
-            sys.exit("Kein Datentyp passt auf den Eintrag 'datentypen'.")
-
-    if tables:
-        pats = [t.strip() for t in tables.split(",")]
-        before = len(tags)
-        tags = [t for t in tags if any(table_match(tag_table.get(root(t[1]), ""), pt) for pt in pats)]
-        print(f"tabellen = {tables}: {len(tags)} von {before} Eintraegen.")
-        if not tags:
-            sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig (--tabellen zeigt die Tabellen).")
+            sys.exit("Kein Eintrag passt auf die Filter (namen / datentypen / tabellen, --tabellen zeigt "
+                     "die Tabellen).")
 
     usage_map = None
     if res and (f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet")):
@@ -494,9 +512,9 @@ def main():
     # Gruppieren nach Tabelle (Reihenfolge wie unter 'tabellen', sonst alphabetisch)
     groups = None
     if v.getboolean("gruppieren") and tag_table:
-        pats = [t.strip() for t in tables.split(",")] if tables else []
+        pats = f_table.incl
         def order(tbl):
-            idx = next((i for i, pt in enumerate(pats) if table_match(tbl, pt)), len(pats))
+            idx = next((i for i, pt in enumerate(pats) if _table_hit(tbl, pt)), len(pats))
             return (idx, tbl.lower())
         by_table = {}
         for t in tags:

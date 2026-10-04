@@ -186,7 +186,10 @@ class _Worker:
                         self._send("attach_project", {}, 120)
                 result = self._send(name, args, _WORKER_TIMEOUT_S)
             finally:
-                self.last_call = time.monotonic()
+                # Statusabfragen zaehlen nicht als Aktivitaet - sonst haelt ein Skript, das
+                # regelmaessig den Status prueft, den Worker (und damit TIA) dauerhaft fest
+                if name != "get_session_status" or fresh:
+                    self.last_call = time.monotonic()
             if name in ("connect_portal", "open_portal"):
                 self.connected, self.attached = True, False
             elif name in ("attach_project", "open_project", "create_project"):

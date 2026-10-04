@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """
-json2vorlage.py - erzeugt eine WinCC-Unified-Berichtsvorlage (.xlsx) aus einer
-Offline-Konfigurationsdatei (.json) des Bericht-Controls.
+json2vorlage.py - erzeugt eine WinCC-Unified-Berichtsvorlage (.xlsx) aus der
+Offline-Konfiguration (.json) des Bericht-Controls.
 
-Jede Variable aus der JSON wird untereinander eingetragen:
-    Spalte A = Variablenname, Spalte B = Wert (Einzelwert-Segment)
-Oben im Blatt stehen Titel und "Erstellt am:" (Zeitstempel von @Heartbeat, also der
-Moment der Berichtserzeugung), in der Druck-Kopfzeile Titel sowie Datum/Uhrzeit.
-Mit --quality wird zu jedem Wert der Qualitaetscode ausgegeben (z.B. BAD bei fehlender
-Verbindung - sonst steht dort einfach 0).
+Aufruf:
+    python json2vorlage.py anlage.json
 
-Basis-Datei: eine einmal mit dem Excel-Add-in angelegte .xlsx, die mindestens ein
-Einzelwert-Segment mit einer Variable enthaelt (z.B. test.xlsx). Daraus werden die
-Add-in-Verknuepfung und die Segment-Konfiguration uebernommen.
+Alle Einstellungen stehen in json2vorlage.ini neben dem Skript (Titel, Ausgabedatei,
+Qualitaetsspalte, Filter nach Variablentabellen, nur verwendete Variablen ...).
+Die Ini-Datei ist kommentiert; fehlt sie, gelten die Standardwerte.
 
-Beispiele:
-    python json2vorlage.py "test (1).json"
-    python json2vorlage.py "test (1).json" --base test.xlsx --out Bericht.xlsx --title "Linie 1"
-    python json2vorlage.py "test (1).json" --system           # auch @System-Tags
-    python json2vorlage.py "test (1).json" --filter "^Test_"  # nur passende Namen
-    python json2vorlage.py "test (1).json" --list             # nur anzeigen
-    python json2vorlage.py anlage.json --tags-xlsx HMITags.xlsx --tables "SPS_*"   # nur bestimmte Tabellen
-    python json2vorlage.py anlage.json --tags-xlsx HMITags.xlsx --list-tables      # Tabellen anzeigen
-    python json2vorlage.py anlage.json --tags-xlsx HMITags.xlsx    # Tabellen aus tabellen.txt neben dem Skript
+Weitere Aufrufe:
+    python json2vorlage.py anlage.json --list         Variablen nur anzeigen
+    python json2vorlage.py anlage.json --tabellen     Variablentabellen aus der Excel-Datei anzeigen
+    python json2vorlage.py anlage.json --ini linie2.ini   andere Ini-Datei verwenden
+
+Ergebnis: Jede Variable steht untereinander (Spalte A Name, Spalte B Wert), UDTs und Arrays
+sind in ihre Elemente aufgeloest. Oben stehen Titel und "Erstellt am:" (Zeitpunkt der
+Berichtserzeugung), optional rechts der Qualitaetscode und die Fundstellen im HMI.
 """
 import argparse
+import configparser
 import copy
 import fnmatch
 import html
@@ -157,21 +153,6 @@ def table_filter(xlsx_path, tables=None):
         return any(fnmatch.fnmatchcase(path, pt) or fnmatch.fnmatchcase(last, pt) for pt in pats)
     allowed = {n for n, pth in tag_tables.items() if match(pth)}
     return allowed, tag_tables
-
-
-DEFAULT_TABLES_FILE = "tabellen.txt"
-
-
-def read_tables_file(path):
-    """Tabellennamen aus Textdatei: eine pro Zeile, '#' = Kommentar, Platzhalter erlaubt."""
-    names = []
-    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            names.append(line)
-    if not names:
-        sys.exit(f"{path}: keine Tabellennamen gefunden.")
-    return ",".join(names)
 
 
 def mcp_call(tool, port=47823, **args):
@@ -386,103 +367,115 @@ def build(tags, base, out, sheet_name, title, first_row, heartbeat=None, quality
             zout.writestr(item, data.encode("utf-8") if data is not None else zin.read(item.filename))
 
 
+INI_NAME = "json2vorlage.ini"
+INI_DEFAULTS = {
+    "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
+                "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja"},
+    "filter": {"variablen_excel": "", "tabellen": "", "name_filter": "", "system_tags": "nein",
+               "nur_verwendete": "nein", "spalte_verwendet": "nein"},
+}
+
+
+def load_ini(path):
+    cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
+    cp.BOOLEAN_STATES = {**configparser.ConfigParser.BOOLEAN_STATES, "ja": True, "nein": False,
+                         "j": True, "n": False}
+    cp.read_dict(INI_DEFAULTS)
+    if path.exists():
+        cp.read(path, encoding="utf-8-sig")
+    return cp
+
+
+def resolve(value, ini_dir):
+    """Relative Pfade: zuerst im aktuellen Ordner, sonst neben der Ini-Datei suchen."""
+    if not value:
+        return None
+    pth = Path(value)
+    if pth.is_absolute() or pth.exists():
+        return pth
+    beside = ini_dir / pth
+    return beside if beside.exists() else pth
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description="Berichtsvorlage aus der Offline-Konfiguration erzeugen. "
+                    f"Einstellungen in {INI_NAME} neben dem Skript.")
     ap.add_argument("json", help="Offline-Konfiguration aus dem Bericht-Control (.json)")
-    ap.add_argument("--base", help="vom Add-in angelegte Basis-.xlsx (Standard: basis_vorlage.xlsx neben dem "
-                                   "Skript, sonst test.xlsx im aktuellen Ordner)")
-    ap.add_argument("--out", default="Vorlage_Variablen.xlsx", help="Ausgabedatei")
-    ap.add_argument("--sheet", default="Tabelle1", help="Blattname in der Basis-Datei")
-    ap.add_argument("--title", default="Variablenbericht", help="Titel oben und in der Kopfzeile")
-    ap.add_argument("--first-row", type=int, default=5, help="erste Zeile der Variablenliste")
-    ap.add_argument("--system", action="store_true", help="auch System-Tags (@...) aufnehmen")
-    ap.add_argument("--filter", help="Regex auf den Kurznamen, z.B. '^Test_'")
-    ap.add_argument("--list", action="store_true", help="nur Variablen anzeigen, keine Datei schreiben")
-    ap.add_argument("--quality", action="store_true", help="Qualitaetscode rechts neben jedem Wert ausgeben")
-    ap.add_argument("--no-created", action="store_true", help="keine Zeile 'Erstellt am:' (Zeitstempel von @Heartbeat)")
-    ap.add_argument("--used-only", action="store_true",
-                    help="nur Variablen, die im HMI verwendet werden (Bilder, Alarme, Archiv, Skripte) - "
-                         "fragt den TIA-MCP-Server (Projekt muss in TIA offen sein) oder --usage-json")
-    ap.add_argument("--usage-column", action="store_true", help="Spalte D 'Verwendet in' mit den Fundstellen")
-    ap.add_argument("--usage-json", help="gespeichertes Ergebnis von list_hmi_tag_usage statt Live-Abfrage")
-    ap.add_argument("--save-usage", help="Ergebnis von list_hmi_tag_usage zusaetzlich als JSON speichern")
-    ap.add_argument("--tags-xlsx", help="TIA-Export der HMI-Variablen (HMITags.xlsx) als Filter: "
-                                        "nur Variablen, die darin stehen")
-    ap.add_argument("--tables", help="mit --tags-xlsx: nur diese Variablentabellen (Komma, Platzhalter "
-                                     "erlaubt, z.B. 'SPS_*,Antriebe')")
-    ap.add_argument("--tables-file",
-                    help=f"Datei mit Tabellennamen (eine pro Zeile). Ohne Angabe wird {DEFAULT_TABLES_FILE} "
-                         "im Ordner des Skripts verwendet, falls vorhanden.")
-    ap.add_argument("--list-tables", action="store_true", help="Tabellen aus --tags-xlsx anzeigen und beenden")
+    ap.add_argument("--ini", help=f"andere Ini-Datei (Standard: {INI_NAME} neben dem Skript)")
+    ap.add_argument("--list", action="store_true", help="Variablen nur anzeigen, keine Datei schreiben")
+    ap.add_argument("--tabellen", action="store_true", help="Variablentabellen aus der Excel-Datei anzeigen")
     a = ap.parse_args()
 
-    if a.list_tables:
-        if not a.tags_xlsx:
-            sys.exit("--list-tables braucht --tags-xlsx.")
+    ini_path = Path(a.ini) if a.ini else Path(__file__).resolve().parent / INI_NAME
+    if a.ini and not ini_path.exists():
+        sys.exit(f"Ini-Datei nicht gefunden: {ini_path}")
+    cp = load_ini(ini_path)
+    v, f = cp["vorlage"], cp["filter"]
+    ini_dir = ini_path.resolve().parent
+    print(f"Einstellungen: {ini_path if ini_path.exists() else 'Standardwerte (keine Ini-Datei)'}")
+
+    tags_xlsx = resolve(f.get("variablen_excel"), ini_dir)
+    if tags_xlsx and not tags_xlsx.exists():
+        sys.exit(f"variablen_excel nicht gefunden: {tags_xlsx}")
+    tables = ",".join(t.strip() for t in re.split(r"[,\n]", f.get("tabellen", "")) if t.strip())
+
+    if a.tabellen:
+        if not tags_xlsx:
+            sys.exit("In der Ini-Datei ist keine variablen_excel eingetragen.")
         from collections import Counter
-        for tbl, n in sorted(Counter(read_tag_tables(a.tags_xlsx).values()).items()):
+        for tbl, n in sorted(Counter(read_tag_tables(tags_xlsx).values()).items()):
             print(f"  {tbl:<40} {n} Variablen")
         return
 
-    tags = read_tags(a.json, a.system, a.filter)
+    tags = read_tags(a.json, f.getboolean("system_tags"), f.get("name_filter") or None)
     if not tags:
-        sys.exit("Keine Variablen gefunden (Filter/--system pruefen).")
+        sys.exit("Keine Variablen gefunden (name_filter / system_tags pruefen).")
 
-    if a.tags_xlsx and not a.tables:
-        tables_file = Path(a.tables_file) if a.tables_file else Path(__file__).resolve().parent / DEFAULT_TABLES_FILE
-        if a.tables_file and not tables_file.exists():
-            sys.exit(f"Tabellendatei nicht gefunden: {tables_file}")
-        if tables_file.exists():
-            a.tables = read_tables_file(tables_file)
-            print(f"Tabellen aus {tables_file}: {a.tables}")
-    elif a.tables_file and not a.tags_xlsx:
-        sys.exit("--tables-file braucht --tags-xlsx.")
-
-    if a.tags_xlsx:
-        allowed, tag_tables = table_filter(a.tags_xlsx, a.tables)
+    if tags_xlsx:
+        allowed, _ = table_filter(tags_xlsx, tables or None)
         if not allowed:
-            sys.exit(f"Keine Variablen fuer Tabellen '{a.tables}' in {a.tags_xlsx} (--list-tables zeigt die Tabellen).")
+            sys.exit(f"Keine Variablen fuer tabellen = {tables} in {tags_xlsx} (--tabellen zeigt die Tabellen).")
         before = len(tags)
-        tags = [t for t in tags if t[1].split("::")[-1].split(".")[0].split("[")[0] in allowed]
+        tags = [t for t in tags if t[1].split(".")[0].split("[")[0] in allowed]
         missing = sorted(allowed - {t[1].split(".")[0].split("[")[0] for t in tags})
-        print(f"--tags-xlsx{' --tables ' + a.tables if a.tables else ''}: {len(tags)} von {before} Eintraegen.")
+        print(f"Filter {tags_xlsx.name}{' / ' + tables if tables else ''}: {len(tags)} von {before} Eintraegen.")
         if missing:
-            print(f"Hinweis: {len(missing)} Variable(n) aus der Excel-Datei fehlen in der JSON: {', '.join(missing[:10])}")
+            print(f"Hinweis: {len(missing)} Variable(n) aus der Excel-Datei fehlen in der JSON: "
+                  f"{', '.join(missing[:10])}")
         if not tags:
             sys.exit("Nach dem Tabellenfilter bleibt nichts uebrig.")
 
     usage_map = None
-    if a.used_only or a.usage_column:
-        device = tags[0][0].split("::", 1)[0]
-        res = load_usage(device, a.usage_json)
-        if a.save_usage:
-            Path(a.save_usage).write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
-            print(f"Verwendung gespeichert: {a.save_usage}")
+    if f.getboolean("nur_verwendete") or f.getboolean("spalte_verwendet"):
+        res = load_usage(tags[0][0].split("::", 1)[0])
         usage_map = {short: usage_for(short, res["usages"]) for _f, short, _d in tags}
-        if a.used_only:
+        if f.getboolean("nur_verwendete"):
             before = len(tags)
             tags = [t for t in tags if usage_map[t[1]]]
-            print(f"--used-only: {len(tags)} von {before} Variablen werden verwendet.")
+            print(f"nur_verwendete: {len(tags)} von {before} Variablen werden im HMI verwendet.")
             if not tags:
                 sys.exit("Keine verwendeten Variablen gefunden.")
+
     print(f"{len(tags)} Variablen:")
     for full, _s, dt in tags:
         print(f"  {full:<45} {dt}")
     if a.list:
         return
-    heartbeat = None if a.no_created else find_heartbeat(a.json)
-    if not a.no_created and not heartbeat:
-        print("Hinweis: @Heartbeat nicht in der JSON - Zeile 'Erstellt am:' entfaellt.")
-    if not a.base:
+
+    base = resolve(v.get("basis"), ini_dir)
+    if not base:
         beside = Path(__file__).resolve().parent / "basis_vorlage.xlsx"
-        a.base = str(beside) if beside.exists() else "test.xlsx"
-    if not Path(a.base).exists():
-        sys.exit(f"Basis-Datei nicht gefunden: {a.base} (mit --base angeben oder basis_vorlage.xlsx "
-                 "neben das Skript legen)")
-    print(f"Basis: {a.base}")
-    build(tags, a.base, a.out, a.sheet, a.title, a.first_row, heartbeat, a.quality,
-          usage_map if a.usage_column else None)
-    print(f"\nVorlage geschrieben: {Path(a.out).resolve()}")
+        base = beside if beside.exists() else Path("test.xlsx")
+    if not base.exists():
+        sys.exit(f"Basis-Datei nicht gefunden: {base} (in der Ini unter basis eintragen)")
+    heartbeat = find_heartbeat(a.json) if v.getboolean("erstellt_am") else None
+    if v.getboolean("erstellt_am") and not heartbeat:
+        print("Hinweis: @Heartbeat nicht in der JSON - Zeile 'Erstellt am:' entfaellt.")
+    out = Path(v.get("ausgabe") or "Vorlage_Variablen.xlsx")
+    build(tags, str(base), str(out), v.get("blatt"), v.get("titel"), v.getint("erste_zeile"),
+          heartbeat, v.getboolean("qualitaet"), usage_map if f.getboolean("spalte_verwendet") else None)
+    print(f"\nBasis: {base}\nVorlage geschrieben: {out.resolve()}")
 
 
 if __name__ == "__main__":

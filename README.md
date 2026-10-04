@@ -460,23 +460,24 @@ Alle Fehler folgen diesem Schema:
 
 ### `json2vorlage.py` — Berichtsvorlage aus der Offline-Konfiguration
 
-Erzeugt eine Excel-Berichtsvorlage für den WinCC-Unified-Bericht-Control aus der Offline-Konfiguration (`.json`, Export im Bericht-Control). Jede Variable wird untereinander als Einzelwert eingetragen (Spalte A Name, Spalte B Wert). UDTs und Arrays werden in ihre Elemente aufgelöst (`Motor1.Temperatur.Wert`, `Messwerte[3]`), Arrays numerisch sortiert. Reines Python, keine Zusatzpakete.
+Erzeugt eine Excel-Berichtsvorlage für den WinCC-Unified-Bericht-Control aus der Offline-Konfiguration (`.json`, Export im Bericht-Control). Jede Variable steht untereinander als Einzelwert (Spalte A Name, Spalte B Wert). UDTs und Arrays werden in ihre Elemente aufgelöst (`Motor1.Temperatur.Wert`, `Messwerte[3]`). Reines Python, keine Zusatzpakete.
 
 ```powershell
-python tools\json2vorlage.py anlage.json --base test.xlsx --out Bericht.xlsx --title "Anlage" --quality
+python tools\json2vorlage.py anlage.json
 ```
 
-| Option | Wirkung |
-|---|---|
-| `--base` | Vom Excel-Add-in angelegte Mappe mit mindestens einem Einzelwert-Segment und leerem Blatt. Standard: `basis_vorlage.xlsx` neben dem Skript, sonst `test.xlsx` im aktuellen Ordner |
-| `--quality` | Qualitätscode rechts neben jedem Wert, angezeigt als `GOOD (192)` / `UNCERTAIN (76)` / `BAD (24)` |
-| *(Standard)* „Erstellt am:“ | Zeitstempel von `@Heartbeat` = Zeitpunkt der Berichtserzeugung (`--no-created` schaltet ab). `=JETZT()` wäre der Zeitpunkt des Öffnens |
-| `--tags-xlsx HMITags.xlsx` | TIA-Export der HMI-Variablen als Filter (Spalte *Path* = Variablentabelle) |
-| `--tables "A,SPS_*"` / `tabellen.txt` | Nur diese Tabellen. Ohne `--tables` wird `tabellen.txt` neben dem Skript gelesen (eine Tabelle pro Zeile, `#` Kommentar, Platzhalter erlaubt) |
-| `--used-only`, `--usage-column` | Nur im HMI verwendete Variablen bzw. Spalte „Verwendet in“ — fragt `list_hmi_tag_usage` über den RPC-Port 47823 des laufenden MCP-Servers (`--save-usage`/`--usage-json` zum Speichern und Wiederverwenden ohne TIA) |
-| `--system`, `--filter REGEX`, `--list`, `--list-tables` | System-Tags aufnehmen, Namensfilter, nur anzeigen |
+Alle Einstellungen stehen in **`tools/json2vorlage.ini`** (kommentiert): Titel, Ausgabedatei, Basis-Mappe, Qualitätsspalte, „Erstellt am:“, Filter nach Variablentabellen (`variablen_excel` = TIA-Export `HMITags.xlsx`, `tabellen`), nur im HMI verwendete Variablen (über `list_hmi_tag_usage` des laufenden MCP-Servers, RPC-Port 47823) und Spalte „Verwendet in“.
 
-Getestet mit WinCC Unified PC RT V21 (Vorlagenformat 5.0.0.0): Werte, UDT-Elemente, verschachtelte UDTs, Arrays, DateTime, Time/LTime (kommen als Text), Qualität und Erstellungszeitpunkt.
+| Aufruf | Wirkung |
+|---|---|
+| `json2vorlage.py anlage.json` | Vorlage nach den Einstellungen der Ini erzeugen |
+| `… --list` | Variablen nur anzeigen |
+| `… --tabellen` | Variablentabellen aus `variablen_excel` anzeigen |
+| `… --ini linie2.ini` | andere Ini-Datei verwenden (z. B. eine pro Anlage) |
+
+Die Basis-Mappe legt man einmal mit dem Excel-Add-in an: leere Mappe, ein Einzelwert-Segment, speichern. Relative Pfade in der Ini werden zuerst im aktuellen Ordner, dann neben der Ini gesucht.
+
+Getestet mit WinCC Unified PC RT V21 (Vorlagenformat 5.0.0.0): Werte, UDT-Elemente, verschachtelte UDTs, Arrays, DateTime, Time/LTime (kommen als Text), Qualität (`GOOD`/`UNCERTAIN`/`BAD` mit Code) und Erstellungszeitpunkt (Zeitstempel von `@Heartbeat`).
 
 ---
 

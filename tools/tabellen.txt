@@ -1,3 +1,0 @@
-# Variablentabellen fuer json2vorlage.py (mit --tags-xlsx)
-# Eine Tabelle pro Zeile, Platzhalter erlaubt (z.B. SPS_*), '#' leitet einen Kommentar ein.
-SPS_Testdaten

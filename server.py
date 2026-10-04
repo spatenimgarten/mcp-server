@@ -206,7 +206,8 @@ class _Worker:
         if _IDLE_KILL_S > 0 and self.alive() and not _bg_status["running"] \
                 and time.monotonic() - self.last_call > _IDLE_KILL_S and self.lock.acquire(blocking=False):
             try:
-                self.kill(f"{_IDLE_KILL_S:.0f}s Leerlauf (naechster Aufruf verbindet neu)")
+                idle = time.monotonic() - self.last_call
+                self.kill(f"{idle:.0f}s Leerlauf, Grenze {_IDLE_KILL_S:.0f}s (naechster Aufruf verbindet neu)")
             finally:
                 self.lock.release()
 

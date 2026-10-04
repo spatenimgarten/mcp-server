@@ -6,13 +6,14 @@ STA Thread · Fehler · Logging · Session · HMI · Bibliothek · Executor
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
-VERSION      = "1.17.0"
+VERSION      = "1.17.1"
 VERSION_DATE = "2026-10-03"
 VERSION_INFO = {
     "version":      VERSION,
     "date":         VERSION_DATE,
     "file":         __file__,
     "changes": [
+        "1.17.1: Variablentabellen in Ordnern (TagTableGroups, rekursiv) werden gelesen — list_hmi_tags, list_hmi_tag_usage und der Tabellen-Export uebersahen sie bisher.",
         "1.17.0: list_hmi_tag_usage liefert zusaetzlich members (aufgeloeste Variablen mit UDT-Elementen und "
         "Array-Eintraegen in Deklarationsreihenfolge, Runtime-Datentyp) und system_members — damit braucht "
         "tools/json2vorlage.py keine Offline-Konfiguration mehr.",
@@ -1434,6 +1435,31 @@ def _hmi_tag_tables(sw):
         return sw.TagTableGroup.TagTables
     return []
 
+def _hmi_all_tag_tables(sw):
+    """Alle HMI-Variablentabellen inkl. Tabellen in Ordnern (rekursiv).
+    _hmi_tag_tables liefert nur die oberste Ebene - in Projekten mit Tabellenordnern
+    fehlten dadurch Variablen (list_hmi_tags, list_hmi_tag_usage, Export)."""
+    result = list(_hmi_tag_tables(sw))
+    def walk(groups):
+        for g in groups or []:
+            for t in getattr(g, "TagTables", None) or []:
+                result.append(t)
+            sub = getattr(g, "Groups", None)
+            if sub is None:
+                sub = getattr(g, "TagTableGroups", None)
+            walk(sub)
+    for attr in ("TagTableGroups", "TagTableGroup"):
+        grp = getattr(sw, attr, None)
+        if grp is not None:
+            walk(grp if hasattr(grp, "__iter__") else [grp])
+            break
+    seen, uniq = set(), []
+    for t in result:                       # Tabellen der obersten Ebene ggf. doppelt -> entfernen
+        key = id(t) if not hasattr(t, "Name") else (str(t.Name), str(getattr(t.Parent, "Name", "")))
+        if key not in seen:
+            seen.add(key); uniq.append(t)
+    return uniq
+
 def _hmi_tag_tables_import(sw, fi, eng):
     """Import-Methode je nach API-Version."""
     if hasattr(sw, "TagTables"):
@@ -1555,7 +1581,7 @@ def list_hmi_screens(device_name):
 def list_hmi_tags(device_name, table_name=None):
     def _run():
         _sess.ensure_project(); sw,ht = _get_hmi(device_name); tags = []
-        for table in _hmi_tag_tables(sw):
+        for table in _hmi_all_tag_tables(sw):
             if table_name and table.Name != table_name: continue
             for tag in table.Tags:
                 tags.append({"name":tag.Name,"table":table.Name,
@@ -1640,7 +1666,7 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
         prefix = f"{device_name}::"
         known = {}                                   # Wurzelname -> Tabelle
         dtypes = {}                                  # Wurzelname -> Datentyp (z.B. UDT_Motor)
-        for tbl in _hmi_tag_tables(sw):
+        for tbl in _hmi_all_tag_tables(sw):
             for t in tbl.Tags:
                 known[str(t.Name)] = str(tbl.Name)
                 try:
@@ -1745,7 +1771,7 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
                     pass
 
         # Archivierung
-        for tbl in _hmi_tag_tables(sw):
+        for tbl in _hmi_all_tag_tables(sw):
             for t in tbl.Tags:
                 try:
                     for lt in t.LoggingTags:
@@ -1785,7 +1811,7 @@ def list_hmi_tag_usage(device_name, include_scripts=True):
         # Aufgeloeste Variablenliste (UDT-Elemente, Array-Eintraege) in Deklarationsreihenfolge,
         # mit Runtime-Datentyp - damit braucht json2vorlage keine Offline-Konfiguration mehr
         members = []
-        for tbl in _hmi_tag_tables(sw):
+        for tbl in _hmi_all_tag_tables(sw):
             for t in tbl.Tags:
                 stack = [(str(t.Name), t)]
                 while stack:
@@ -2382,7 +2408,7 @@ def export_hmi_tags(device_name, output_path=None):
         out_dir = _export_dir(output_path)
 
         exported = []
-        tables = _hmi_tag_tables(sw)
+        tables = _hmi_all_tag_tables(sw)
         for table in tables:
             safe_name = table.Name.replace(" ", "_").replace("/", "_")
             if safe_name == "Default_tag_table":
@@ -3118,7 +3144,7 @@ def export_hmi_tagtable(device_name, table_name, output_path=None):
         import Siemens.Engineering as eng
         from System.IO import FileInfo, DirectoryInfo
         sw, ht = _get_hmi(device_name)
-        for table in _hmi_tag_tables(sw):
+        for table in _hmi_all_tag_tables(sw):
             if table.Name == table_name:
                 # V19/V20: Export() direkt auf Tabelle
                 if hasattr(table, "Export") and callable(getattr(table, "Export")):
@@ -3141,7 +3167,7 @@ def export_hmi_tagtable(device_name, table_name, output_path=None):
                     f"HMI Tag-Tabelle '{table_name}' gefunden, aber kein Export verfügbar "
                     f"({ht}). Workaround: list_hmi_tags + write_import_file.", False,
                     {"table": table_name, "hmi_type": ht})
-        available = [t.Name for t in _hmi_tag_tables(sw)]
+        available = [t.Name for t in _hmi_all_tag_tables(sw)]
         raise TiaError("TABLE_NOT_FOUND", f"HMI Tag-Tabelle '{table_name}' nicht gefunden.", True,
                        {"available": available})
     return sta.run(_tia_call, _run)

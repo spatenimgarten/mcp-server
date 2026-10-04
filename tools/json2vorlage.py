@@ -149,17 +149,78 @@ class McpError(Exception):
     pass
 
 
-def mcp_call(tool, port=47823, **args):
-    """Tool des laufenden TIA-MCP-Servers aufrufen (lokaler RPC-Port der Primaer-Instanz)."""
+MCP_PORT = 47823
+_server = {"dir": None, "proc": None}     # vom Skript selbst gestarteter MCP-Server
+
+
+def start_server():
+    """TIA-MCP-Server im Hintergrund starten (ohne Fenster) und warten, bis der RPC-Port antwortet."""
+    import subprocess, time
+    sdir = Path(_server["dir"])
+    script = sdir / "server.py"
+    if not script.exists():
+        raise McpError(f"MCP-Server nicht gefunden: {script} (Ini: [server] mcp_server)")
+    py = sdir / ".venv" / "Scripts" / "python.exe"
+    print(f"Starte TIA-MCP-Server ({sdir}) ...")
+    _server["proc"] = subprocess.Popen(
+        [str(py if py.exists() else sys.executable), str(script)], cwd=str(sdir),
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    t0 = time.time()
+    while time.time() - t0 < 30:
+        if _server["proc"].poll() is not None:
+            raise McpError("MCP-Server hat sich sofort beendet (Details in C:/tia-mcp/logs/tia_mcp.log).")
+        try:
+            socket.create_connection(("127.0.0.1", MCP_PORT), timeout=1).close()
+            return
+        except OSError:
+            time.sleep(0.5)
+    stop_server()
+    raise McpError("MCP-Server antwortet nach 30 s nicht.")
+
+
+def stop_server():
+    """Selbst gestarteten Server beenden - beendet auch seinen Worker und gibt TIA frei."""
+    import subprocess
+    proc, _server["proc"] = _server["proc"], None
+    if proc is None:
+        return
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=600) as sock:
-            sock.sendall((json.dumps({"tool": tool, "args": args}) + "\n").encode())
-            r = json.loads(sock.makefile("rb").readline())
+        proc.stdin.close()              # stdio-Ende -> Server beendet sich und seinen Worker
+        proc.wait(timeout=15)
+    except Exception:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("TIA-MCP-Server wieder beendet.")
+
+
+def mcp_call(tool, port=MCP_PORT, **args):
+    """Tool des TIA-MCP-Servers aufrufen (lokaler RPC-Port der Primaer-Instanz).
+    Laeuft keiner und ist [server] autostart = ja, wird er gestartet."""
+    try:
+        r = _rpc(tool, port, args)
+    except ConnectionRefusedError as e:
+        if not _server["dir"] or _server["proc"] is not None:
+            raise McpError(f"MCP-Server nicht erreichbar (127.0.0.1:{port}): {e}")
+        start_server()
+        r = _rpc(tool, port, args)
     except OSError as e:
         raise McpError(f"MCP-Server nicht erreichbar (127.0.0.1:{port}): {e}")
     if not r["ok"]:
         raise McpError(f"MCP-Fehler bei {tool}: {r['error']}")
     return r["result"]
+
+
+def _rpc(tool, port, args):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=600) as sock:
+            sock.sendall((json.dumps({"tool": tool, "args": args}) + "\n").encode())
+            return json.loads(sock.makefile("rb").readline())
+    except ConnectionRefusedError:
+        raise
+    except OSError as e:
+        raise McpError(f"MCP-Server nicht erreichbar (127.0.0.1:{port}): {e}")
+
 
 
 def load_usage(device):
@@ -387,6 +448,7 @@ INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja", "hmi": ""},
+    "server": {"mcp_server": r"C:\tia-mcp\mcp-server", "autostart": "ja"},
     "filter": {"tabellen": "", "namen": "", "datentypen": "", "verknuepfung": "und", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
@@ -448,7 +510,15 @@ def main():
     v, f = cp["vorlage"], cp["filter"]
     ini_dir = ini_path.resolve().parent
     print(f"Einstellungen: {ini_path if ini_path.exists() else 'Standardwerte (keine Ini-Datei)'}")
+    if cp["server"].getboolean("autostart"):
+        _server["dir"] = cp["server"].get("mcp_server")
+    try:
+        _main(a, v, f, ini_dir)
+    finally:
+        stop_server()
 
+
+def _main(a, v, f, ini_dir):
     # Welche HMIs?
     wanted = [h.strip() for h in re.split(r"[,\n]", v.get("hmi", "")) if h.strip()]
     if a.json:

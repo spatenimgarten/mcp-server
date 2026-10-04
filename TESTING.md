@@ -49,9 +49,9 @@
 
 | # | Test | Erwartung | Status | Notiz |
 |---|---|---|:---:|---|
-| 2b.1 | `connect_portal`, dann 3 min nichts tun und in der TIA-Oberfläche arbeiten | TIA bleibt bedienbar; Log: „nach 120s Leerlauf getrennt“ | ⬜ | |
-| 2b.2 | Nach 2b.1 beliebiges Tool (z. B. `list_devices`) ohne erneutes `connect_portal` | Läuft; Log: „Automatisch neu verbunden“; Projekt wieder übernommen | ⬜ | |
-| 2b.3 | `disconnect_portal` | `disconnected:true`; TIA sofort frei | ⬜ | |
+| 2b.1 | `connect_portal`, dann 3 min nichts tun und in der TIA-Oberfläche arbeiten | TIA bleibt bedienbar; Log: „nach 120s Leerlauf getrennt“ | ✅ | 2026-10-04: Worker nach 121 s Leerlauf beendet, obwohl alle 10 s get_session_status abgefragt wurde; TIA dabei durchgehend bedienbar |
+| 2b.2 | Nach 2b.1 beliebiges Tool (z. B. `list_devices`) ohne erneutes `connect_portal` | Läuft; Log: „Automatisch neu verbunden“; Projekt wieder übernommen | ✅ | 2026-10-04: list_hmi_tags ohne connect_portal -> neuer Worker, connect_portal + attach_project automatisch wiederholt (2–4 s) |
+| 2b.3 | `disconnect_portal` | `disconnected:true`; TIA sofort frei | ✅ | 2026-10-04: Worker beendet, danach Projekt-Schließen ohne Hänger |
 | 2b.4 | Aufruf, der in TIA einen Dialog auslöst (z. B. HMI-Verbindung per `execute_openness` anlegen) | Kein Hänger; Log `tia.dialog`: Rückfrage → Cancel/No | ⬜ | |
 | 2b.5 | Mehrere TIA-Instanzen offen, `connect_portal` | Prozess mit dem gemerkten bzw. einzigen offenen Projekt wird gewählt; `tia_processes` in der Antwort | ⬜ | |
 | 2b.6 | `create_project` | Projekt wird angelegt (vorher NameError `portal`) | ⬜ | |

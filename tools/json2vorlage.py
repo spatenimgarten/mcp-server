@@ -97,6 +97,30 @@ def find_heartbeat(json_path):
     return None
 
 
+def name_matcher(spec):
+    """Filter aus dem Ini-Eintrag 'namen': Komma oder eine pro Zeile.
+    Ohne Platzhalter = Name enthaelt den Text; mit * oder ? = Muster fuer den ganzen Namen;
+    '!' davor = ausschliessen. Gross-/Kleinschreibung egal. Nur Ausschluesse = alles andere."""
+    entries = [e.strip() for e in re.split(r"[,\n]", spec or "") if e.strip()]
+    if not entries:
+        return None
+    incl = [e.lower() for e in entries if not e.startswith("!")]
+    excl = [e[1:].strip().lower() for e in entries if e.startswith("!")]
+
+    def hit(name, pat):
+        # Nur * und ? sind Platzhalter; [ ] bleiben normaler Text (Array-Index wie Messwerte[3])
+        if any(c in pat for c in "*?"):
+            return fnmatch.fnmatchcase(name, pat.replace("[", "[[]"))
+        return pat in name
+
+    def match(short):
+        n = short.lower()
+        if incl and not any(hit(n, p) for p in incl):
+            return False
+        return not any(hit(n, p) for p in excl)
+    return match
+
+
 def read_tag_tables(xlsx_path):
     """TIA-Variablenexport (HMITags.xlsx) lesen -> {Variablenname: Tabellenpfad}.
     Ohne Zusatzpakete (nur zipfile/xml), damit das Skript an der Anlage ohne pip laeuft."""
@@ -398,7 +422,7 @@ INI_DEFAULTS = {
     "vorlage": {"titel": "Variablenbericht", "ausgabe": "Vorlage_Variablen.xlsx", "basis": "",
                 "blatt": "Tabelle1", "erste_zeile": "5", "qualitaet": "ja", "erstellt_am": "ja",
                 "gruppieren": "ja"},
-    "filter": {"variablen_excel": "", "tabellen": "", "name_filter": "", "system_tags": "nein",
+    "filter": {"variablen_excel": "", "tabellen": "", "namen": "", "system_tags": "nein",
                "nur_verwendete": "nein", "spalte_verwendet": "nein", "verwendung_datei": ""},
 }
 
@@ -455,9 +479,16 @@ def main():
             print(f"  {tbl:<40} {n} Variablen")
         return
 
-    tags = read_tags(a.json, f.getboolean("system_tags"), f.get("name_filter") or None)
+    tags = read_tags(a.json, f.getboolean("system_tags"))
     if not tags:
-        sys.exit("Keine Variablen gefunden (name_filter / system_tags pruefen).")
+        sys.exit("Keine Variablen in der JSON gefunden.")
+    match = name_matcher(f.get("namen"))
+    if match:
+        before = len(tags)
+        tags = [t for t in tags if match(t[1])]
+        print(f"namen = {' '.join(f.get('namen').split())}: {len(tags)} von {before} Eintraegen.")
+        if not tags:
+            sys.exit("Kein Name passt auf den Eintrag 'namen'.")
     root = lambda short: short.split(".")[0].split("[")[0]
     device = tags[0][0].split("::", 1)[0]
 
